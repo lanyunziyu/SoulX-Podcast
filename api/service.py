@@ -5,8 +5,11 @@ import re
 import logging
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional,Dict,Any
 import torch
+import pickle
+import hashlib
+
 import numpy as np
 import random
 import concurrent.futures
@@ -44,7 +47,7 @@ class SoulXPodcastService:
         # 使用实例属性而不是类属性
         self._load_model()
         logger.info("Initializing SoulXPodcastService (first time)")
-        self._preload_data()  # 预加载数据
+        self._init_cache_system()
 
     def _load_model(self):
         """加载模型"""
@@ -85,122 +88,126 @@ class SoulXPodcastService:
         """检查模型是否已加载"""
         return hasattr(self, 'model') and self.model is not None
 
-    def _preload_data(self):
+    def _init_cache_system(self):
         """
-        预加载不同模式的数据
-        模式参数规则 (三位数字):
-        - 第一位: 0=单人, 1=双人
-        - 第二位: 0=男生, 1=女生 (单人时有效), 2=占位符 (双人时)
-        - 第三位: 0=普通话, 1=英语
+        初始化缓存系统
 
-        示例:
-        - "100": 单人男生普通话
-        - "110": 单人女生普通话
-        - "101": 单人男生英语
-        - "120": 双人普通话
-        - "121": 双人英语
+        缓存策略：
+        - 使用音频文件的SHA256哈希 + 文本的归一化哈希作为缓存key
+        - 缓存内容包括：prompt_text_tokens, spk_emb, mel, mel_len, log_mel
+        - 缓存持久化到磁盘，支持服务重启后恢复
         """
         try:
-            import json
-            from pathlib import Path
+            # 创建缓存目录
+            self.cache_dir = Path(__file__).parent.parent / "cache" / "prompt_features"
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-            logger.info("Preloading data for different modes...")
-            self.preloaded_data = {}
+            # 内存缓存（快速访问）
+            self.memory_cache: Dict[str, Dict[str, Any]] = {}
+            self.cache_lock = threading.Lock()
 
-            base_path = Path(__file__).parent.parent
-
-            # 定义模式到文件的映射
-            mode_configs = {
-                "000": {  # 单人男生普通话
-                    "script_path": base_path / "example/mel_sigal_script/script_mandarin.json",
-                    "description": "单人男生普通话"
-                },
-                "001": {  # 单人男生英语
-                    "script_path": base_path / "example/mel_sigal_script/script_english.json",
-                    "description": "单人男生英语"
-                },
-                "010": {  # 单人女生普通话
-                    "script_path": base_path / "example/femel_sigal_script/script_mandarin.json",
-                    "description": "单人女生普通话"
-                },
-                "011": {  # 单人女生英语
-                    "script_path": base_path / "example/femel_sigal_script/script_english.json",
-                    "description": "单人女生英语"
-                },
-                "120": {  # 双人普通话
-                    "script_path": base_path / "example/podcast_script/script_mandarin.json",
-                    "description": "双人普通话"
-                },
-                "121": {  # 双人英语
-                    "script_path": base_path / "example/podcast_script/script_english.json",
-                    "description": "双人英语"
-                }
-            }
-
-            # 预加载每个模式的数据
-            for mode, config in mode_configs.items():
-                script_path = config["script_path"]
-
-                if not script_path.exists():
-                    logger.warning(f"Script file not found for mode {mode}: {script_path}")
-                    continue
-
-                # 读取JSON配置
-                with open(script_path, 'r', encoding='utf-8') as f:
-                    script_data = json.load(f)
-
-                # 解析speakers数据
-                speakers = script_data.get("speakers", {})
-
-                # 构建数据项列表
-                prompt_audio_paths = []
-                prompt_texts = []
-
-                for spk_id in sorted(speakers.keys()):
-                    spk_info = speakers[spk_id]
-                    prompt_audio_path = str(base_path / spk_info["prompt_audio"])
-                    prompt_text = spk_info["prompt_text"]
-
-                    prompt_audio_paths.append(prompt_audio_path)
-                    prompt_texts.append(prompt_text)
-
-                # 处理数据获取特征
-                if prompt_audio_paths:
-                    # 构建临时数据项用于提取特征
-                    temp_dataitem = {
-                        "key": f"preload_{mode}",
-                        "prompt_text": prompt_texts,
-                        "prompt_wav": prompt_audio_paths,
-                        "text": [""],  # 占位符
-                        "spk": [0],    # 占位符
-                    }
-
-                    # 使用dataset处理数据
-                    self.dataset.update_datasource([temp_dataitem])
-                    data = self.dataset[0]
-
-                    if data is not None:
-                        # 保存预处理的特征
-                        self.preloaded_data[mode] = {
-                            "prompt_text_ids_list": data["prompt_text_tokens"],
-                            "spk_emb_list": data["spk_emb"],
-                            "mel_list": data["mel"],
-                            "mel_len_list": data["mel_len"],
-                            "log_mel_list": data["log_mel"],
-                            "prompt_audio_paths": prompt_audio_paths,
-                            "prompt_texts": prompt_texts,
-                            "description": config["description"]
-                        }
-                        logger.info(f"✓ Preloaded mode {mode}: {config['description']}")
-                    else:
-                        logger.warning(f"Failed to process data for mode {mode}")
-
-            logger.info(f"Data preloading completed. {len(self.preloaded_data)} modes loaded.")
+            logger.info(f"Cache system initialized at: {self.cache_dir}")
+            logger.info(f"Existing cache files: {len(list(self.cache_dir.glob('*.pkl')))}")
 
         except Exception as e:
-            logger.error(f"Failed to preload data: {e}", exc_info=True)
-            # 不抛出异常,允许服务继续运行
-            self.preloaded_data = {}
+            logger.error(f"Failed to initialize cache system: {e}")
+            self.cache_dir = None
+            self.memory_cache = {}
+
+    def _compute_audio_hash(self, audio_path: str) -> str:
+        """计算音频文件的SHA256哈希"""
+        sha256_hash = hashlib.sha256()
+        with open(audio_path, "rb") as f:
+            # 分块读取以处理大文件
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+
+    def _compute_text_hash(self, text: str) -> str:
+        """计算文本的SHA256哈希（归一化后）"""
+        # 文本归一化：去除空格、转小写
+        normalized_text = text.strip().lower().replace(" ", "")
+        return hashlib.sha256(normalized_text.encode('utf-8')).hexdigest()
+
+    def _get_cache_key(self, audio_path: str, prompt_text: str, dialect_prompt_text: Optional[str] = None) -> str:
+        """
+        生成缓存key
+
+        Args:
+            audio_path: 音频文件路径
+            prompt_text: 提示文本
+            dialect_prompt_text: 方言提示文本（可选）
+
+        Returns:
+            缓存key字符串
+        """
+        audio_hash = self._compute_audio_hash(audio_path)
+        text_hash = self._compute_text_hash(prompt_text)
+
+        # 如果有dialect_prompt_text，也加入哈希
+        if dialect_prompt_text:
+            dialect_hash = self._compute_text_hash(dialect_prompt_text)
+            cache_key = f"{audio_hash}_{text_hash}_{dialect_hash}"
+        else:
+            cache_key = f"{audio_hash}_{text_hash}"
+
+        return cache_key
+
+    def _load_from_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        从缓存加载数据
+
+        Args:
+            cache_key: 缓存键
+
+        Returns:
+            缓存的特征数据，如果不存在返回None
+        """
+        # 先检查内存缓存
+        if cache_key in self.memory_cache:
+            logger.debug(f"Cache hit (memory): {cache_key[:16]}...")
+            return self.memory_cache[cache_key]
+
+        # 检查磁盘缓存
+        if self.cache_dir:
+            cache_file = self.cache_dir / f"{cache_key}.pkl"
+            if cache_file.exists():
+                try:
+                    with open(cache_file, 'rb') as f:
+                        cached_data = pickle.load(f)
+
+                    # 加载到内存缓存
+                    with self.cache_lock:
+                        self.memory_cache[cache_key] = cached_data
+
+                    logger.info(f"Cache hit (disk): {cache_key[:16]}...")
+                    return cached_data
+                except Exception as e:
+                    logger.warning(f"Failed to load cache from {cache_file}: {e}")
+
+        return None
+
+    def _save_to_cache(self, cache_key: str, data: Dict[str, Any]):
+        """
+        保存数据到缓存
+
+        Args:
+            cache_key: 缓存键
+            data: 要缓存的特征数据
+        """
+        # 保存到内存缓存
+        with self.cache_lock:
+            self.memory_cache[cache_key] = data
+
+        # 保存到磁盘缓存
+        if self.cache_dir:
+            cache_file = self.cache_dir / f"{cache_key}.pkl"
+            try:
+                with open(cache_file, 'wb') as f:
+                    pickle.dump(data, f)
+                logger.info(f"Cached features saved: {cache_key[:16]}...")
+            except Exception as e:
+                logger.warning(f"Failed to save cache to {cache_file}: {e}")
 
 
     def generate(
@@ -213,7 +220,7 @@ class SoulXPodcastService:
         top_k: int = 100,
         top_p: float = 0.9,
         repetition_penalty: float = 1.25,
-        mode: Optional[str] = None,
+        dialect_prompt_texts: Optional[List[str]] = None,
     ) -> Tuple[int, np.ndarray]:
         """
         生成语音
@@ -227,8 +234,7 @@ class SoulXPodcastService:
             top_k: Top-K采样
             top_p: Top-P采样
             repetition_penalty: 重复惩罚
-            mode: 模式参数(三位数字),如 "000"=单人男生普通话, "010"=单人女生普通话, "120"=双人普通话
-                  如果提供mode,则使用预加载的数据;否则使用传入的prompt_audio_paths和prompt_texts
+            dialect_prompt_texts: 方言提示文本列表（可选）
 
         Returns:
             Tuple[int, np.ndarray]: (采样率, 音频数组)
@@ -255,26 +261,7 @@ class SoulXPodcastService:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             dataset_time_end = time.time()
-            if mode and mode in self.preloaded_data:
-                logger.info(f"Using preloaded data for mode: {mode} ({self.preloaded_data[mode]['description']})")
-                preloaded = self.preloaded_data[mode]
-                prompt_audio_paths = preloaded["prompt_audio_paths"]
-                prompt_texts = preloaded["prompt_texts"]
 
-                # 直接使用预加载的特征
-                use_preloaded_features = True
-                preloaded_features = {
-                    "log_mel": preloaded["log_mel_list"],
-                    "spk_emb": preloaded["spk_emb_list"],
-                    "mel": preloaded["mel_list"],
-                    "mel_len": preloaded["mel_len_list"],
-                    "prompt_text_tokens": preloaded["prompt_text_ids_list"],
-                }
-            elif mode:
-                logger.warning(f"Mode {mode} not found in preloaded data, falling back to dynamic processing")
-                use_preloaded_features = False
-            else:
-                use_preloaded_features = False
 
             num_speakers = len(prompt_audio_paths)
             logger.info(f"Generating audio for {num_speakers} speaker(s)")
@@ -295,37 +282,27 @@ class SoulXPodcastService:
                 else:
                     raise ValueError(f"无效的对话文本格式: {target_text}")
                 
-            # 如果使用预加载特征,直接构建data
-            if use_preloaded_features:
-                # 处理文本tokens
-                from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
-                from soulxpodcast.utils.text import normalize_text
+            use_dialect_prompt = dialect_prompt_texts is not None and len(dialect_prompt_texts) > 0
+            cached_features_list = []
+            need_processing = []  # 需要处理的索引
 
-                text_ids_list, spks_list = [], []
-                for text, spk in zip(texts, spks):
-                    text = normalize_text(text)
-                    text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
-                    text_ids = self.model.llm.tokenizer.encode(text)
-                    text_ids_list.append(text_ids)
-                    spks_list.append(spk)
+            for i, (audio_path, prompt_text) in enumerate(zip(prompt_audio_paths, prompt_texts)):
+                dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
+                cache_key = self._get_cache_key(audio_path, prompt_text, dialect_text)
 
-                data = {
-                    "log_mel": preloaded_features["log_mel"],
-                    "spk_emb": preloaded_features["spk_emb"],
-                    "mel": preloaded_features["mel"],
-                    "mel_len": preloaded_features["mel_len"],
-                    "prompt_text_tokens": preloaded_features["prompt_text_tokens"],
-                    "text_tokens": text_ids_list,
-                    "spks_list": spks_list,
-                    "info": {
-                        "key": f"api_mode_{mode}",
-                        "prompt_text": prompt_texts,
-                        "prompt_wav": prompt_audio_paths,
-                        "text": texts,
-                        "spk": spks,
-                    }
-                }
-            else:
+                cached = self._load_from_cache(cache_key)
+                if cached:
+                    cached_features_list.append(cached)
+                    logger.info(f"Using cached features for speaker {i}")
+                else:
+                    cached_features_list.append(None)
+                    need_processing.append(i)
+                    logger.info(f"Cache miss for speaker {i}, will process")
+
+            # 如果有需要处理的，批量处理
+            if need_processing:
+                logger.info(f"Processing {len(need_processing)} speakers without cache")
+
                 # 构建数据项
                 dataitem = {
                     "key": "api_001",
@@ -334,12 +311,73 @@ class SoulXPodcastService:
                     "text": texts,
                     "spk": spks,
                 }
-                # 更新数据源
-                self.dataset.update_datasource([dataitem])
 
-                # 获取处理后的数据
+                if use_dialect_prompt:
+                    dataitem["dialect_prompt_text"] = dialect_prompt_texts
+
+                # 更新数据源并处理
+                self.dataset.update_datasource([dataitem])
                 data = self.dataset[0]
-        # # 构建数据项
+
+                # 提取并缓存新处理的特征
+                for i in need_processing:
+                    dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
+                    cache_key = self._get_cache_key(prompt_audio_paths[i], prompt_texts[i], dialect_text)
+
+                    # 保存单个speaker的特征
+                    speaker_features = {
+                        "prompt_text_tokens": data["prompt_text_tokens"][i],
+                        "spk_emb": data["spk_emb"][i],
+                        "mel": data["mel"][i],
+                        "mel_len": data["mel_len"][i],
+                        "log_mel": data["log_mel"][i],
+                    }
+                    if use_dialect_prompt:
+                        speaker_features["dialect_prompt_text_tokens"] = data["dialect_prompt_text_tokens"][i]
+
+                    self._save_to_cache(cache_key, speaker_features)
+                    cached_features_list[i] = speaker_features
+
+                # 使用处理好的data
+            else:
+                # 全部来自缓存，重新组装data
+                logger.info("All speakers loaded from cache, reconstructing data")
+
+                from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
+                from soulxpodcast.utils.text import normalize_text
+
+                # 处理目标文本tokens
+                text_ids_list, spks_list = [], []
+                for text, spk in zip(texts, spks):
+                    text = normalize_text(text)
+                    text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
+                    text_ids = self.model.llm.tokenizer.encode(text)
+                    text_ids_list.append(text_ids)
+                    spks_list.append(spk)
+
+                # 从缓存重建data
+                data = {
+                    "log_mel": [f["log_mel"] for f in cached_features_list],
+                    "spk_emb": [f["spk_emb"] for f in cached_features_list],
+                    "mel": [f["mel"] for f in cached_features_list],
+                    "mel_len": [f["mel_len"] for f in cached_features_list],
+                    "prompt_text_tokens": [f["prompt_text_tokens"] for f in cached_features_list],
+                    "text_tokens": text_ids_list,
+                    "spks_list": spks_list,
+                    "info": {
+                        "key": "api_cached",
+                        "prompt_text": prompt_texts,
+                        "prompt_wav": prompt_audio_paths,
+                        "text": texts,
+                        "spk": spks,
+                    }
+                }
+
+                if use_dialect_prompt:
+                    data["dialect_prompt_text_tokens"] = [f["dialect_prompt_text_tokens"] for f in cached_features_list]
+                    data["use_dialect_prompt"] = True
+                
+            # # 构建数据项
             # dataitem = {
             #     "key": "api_001",
             #     "prompt_text": prompt_texts,

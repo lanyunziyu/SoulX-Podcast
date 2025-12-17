@@ -70,62 +70,77 @@ def test_sync_single_speaker(api_url: str):
         files['prompt_audio'].close()
 
 
-def test_sync_with_mode(api_url: str, mode: str = "110"):
-    """测试同步生成 - 使用mode参数（预加载数据）"""
+def test_cache_performance(api_url: str):
+    """测试缓存性能 - 相同音频和文本的多次请求"""
     print("\n" + "=" * 60)
-    print(f"测试: 同步生成 - 使用mode={mode}")
+    print("测试: 缓存性能测试")
     print("=" * 60)
 
-    # 模式说明
-    mode_descriptions = {
-        "000": "单人男生普通话",
-        "001": "单人男生英语",
-        "010": "单人女生普通话",
-        "011": "单人女生英语",
-        "120": "双人普通话",
-        "121": "双人英语",
-    }
+    # 准备文件
+    audio_file = "example/audios/female_mandarin.wav"
+    if not Path(audio_file).exists():
+        print(f"错误: 找不到音频文件 {audio_file}")
+        return
 
-    print(f"模式: {mode} - {mode_descriptions.get(mode, '未知模式')}")
+    dialogue_text = '[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。'
 
-    # 根据模式准备对话文本
-    if mode[0] == '0':  # 单人
-        dialogue_text = '[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。'
-    else:  # 双人
-        dialogue_text = '[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
+    print("说明: 我们将使用相同的音频和文本发送3次请求")
+    print("第1次: 处理并缓存特征（慢）")
+    print("第2次和第3次: 使用缓存（快）")
+    print()
 
-    # data 用于发送表单文本字段
-    data = {
-        'mode': mode,
-        'dialogue_text': dialogue_text,
-        'seed': 1988
-    }
+    times = []
 
-    print(f"发送请求到: {api_url}/generate")
-    print(f"对话文本: {dialogue_text[:50]}")
-    start_time = time.time()
+    for i in range(1, 2):
+        print(f"\n--- 第{i}次请求 ---")
 
-    try:
-        # 发送请求（不需要上传文件）
-        response = requests.post(f"{api_url}/generate", data=data)
-        response.raise_for_status()
+        files = {'prompt_audio': open(audio_file, 'rb')}
+        data = {
+            'prompt_texts': json.dumps(["喜欢攀岩、徒步、滑雪的语言爱好者。"]),
+            'dialogue_text': dialogue_text,
+            'seed': 1988
+        }
 
-        # 保存结果
-        output_path = f"api/outputs/test_mode_{mode}.wav"
-        # 确保目录存在
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'wb') as f:
-            f.write(response.content)
+        start_time = time.time()
 
-        elapsed = time.time() - start_time
-        print(f"✓ 生成成功!")
-        print(f"  耗时: {elapsed:.2f}秒")
-        print(f"  保存到: {output_path}")
+        try:
+            response = requests.post(f"{api_url}/generate", files=files, data=data)
+            response.raise_for_status()
 
-    except requests.exceptions.RequestException as e:
-        print(f"✗ 请求失败: {e}")
-        if hasattr(e.response, 'text'):
-            print(f"  错误详情: {e.response.text}")
+            elapsed = time.time() - start_time
+            times.append(elapsed)
+
+            # 保存结果
+            output_path = f"api/outputs/test_cache_{i}.wav"
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+
+            cache_status = "❄️  (处理+缓存)" if i == 1 else "⚡ (使用缓存)"
+            print(f"✓ 生成成功! {cache_status}")
+            print(f"  耗时: {elapsed:.2f}秒")
+            print(f"  保存到: {output_path}")
+
+        except requests.exceptions.RequestException as e:
+            print(f"✗ 请求失败: {e}")
+        finally:
+            files['prompt_audio'].close()
+
+    # # 统计
+    # if len(times) == 3:
+    #     print("\n" + "=" * 60)
+    #     print("📊 缓存性能统计")
+    #     print("=" * 60)
+    #     print(f"第1次请求 (无缓存): {times[0]:.2f}秒")
+    #     print(f"第2次请求 (有缓存): {times[1]:.2f}秒")
+    #     print(f"第3次请求 (有缓存): {times[2]:.2f}秒")
+
+    #     if times[0] > times[1]:
+    #         speedup = times[0] / times[1]
+    #         print(f"\n⚡ 缓存加速比: {speedup:.2f}x")
+    #         print(f"💾 节省时间: {times[0] - times[1]:.2f}秒 ({(1 - times[1]/times[0])*100:.1f}%)")
+    #     else:
+    #         print("\n⚠️  注意: 第2次请求未出现预期的加速，可能缓存未生效")
 
 def test_sync_single_speaker_batch(api_url: str, batch_size: int = 100, max_workers: int = 10):
     """测试同步生成 - 单说话人批量并发请求"""
@@ -441,16 +456,9 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["health", "sync", "async", "all", "preset"],
-        default="preset",
-        help="测试模式（默认: sync）。preset: 测试预设模式"
-    )
-    parser.add_argument(
-        "--preset-mode",
-        type=str,
-        default="010",
-        choices=["000", "001", "010", "011", "120", "121"],
-        help="预设模式参数: 000=单人男生普通话, 001=单人男生英语, 010=单人女生普通话, 011=单人女生英语, 120=双人普通话, 121=双人英语（默认: 010）"
+        choices=["health", "sync", "async", "cache", "all"],
+        default="sync",
+        help="测试模式（默认: sync）。cache: 测试缓存性能"
     )
     parser.add_argument(
         "--batch-size",
@@ -481,17 +489,8 @@ def main():
         # test_sync_multi_speaker(args.url)
         # test_sync_single_speaker_batch(args.url, args.batch_size, args.max_workers)
 
-    if args.mode == "preset":
-        # 测试指定的预设模式
-        test_sync_with_mode(args.url, args.preset_mode)
-
-    if args.mode == "all":
-        # 测试所有预设模式
-        print("\n" + "=" * 60)
-        print("测试所有预设模式")
-        print("=" * 60)
-        for preset_mode in ["100", "110", "120"]:
-            test_sync_with_mode(args.url, preset_mode)
+    if args.mode in ["cache", "all"]:
+        test_cache_performance(args.url)
 
     if args.mode in ["async", "all"]:
         test_async(args.url)

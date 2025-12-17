@@ -74,7 +74,7 @@ class PodcastDataset(Dataset):
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         option.intra_op_num_threads = 1
         self.spk_model = onnxruntime.InferenceSession(f"{self.model_config.model}/campplus.onnx", sess_options=option,
-                                                      providers=["CPUExecutionProvider"])
+                                                      providers=["CUDAExecutionProvider"])
 
     def __len__(self):
         return len(self.datas)

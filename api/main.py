@@ -140,10 +140,9 @@ async def health_check():
 
 @app.post("/generate", tags=["Generation"])
 async def generate_sync(
-    prompt_audio: List[UploadFile] = File(default=None, description="参考音频文件（1-4个），如果提供mode参数则可选"),
-    prompt_texts: List[str] = Form(default=None, description="参考文本JSON数组，如: [\"文本1\", \"文本2\"]，如果提供mode参数则可选"),
+    prompt_audio: List[UploadFile] = File(..., description="参考音频文件（1-4个）"),
+    prompt_texts: List[str] = Form(..., description="参考文本JSON数组，如: [\"文本1\", \"文本2\"]"),
     dialogue_text: str = Form(..., description="要生成的对话文本"),
-    mode: str = Form(default=None, description="模式参数(三位数字): 000=单人男生普通话, 010=单人女生普通话, 001=单人男生英语, 011=单人女生英语, 120=双人普通话, 121=双人英语"),
     seed: int = Form(default=1988, description="随机种子"),
     temperature: float = Form(default=0.6, ge=0.1, le=2.0, description="采样温度"),
     top_k: int = Form(default=100, ge=1, le=500, description="Top-K采样"),
@@ -160,53 +159,36 @@ async def generate_sync(
 
     try:
         # 如果提供了mode参数，使用预加载数据
-        if mode:
-            logger.info(f"Using preset mode: {mode}")
-            # 验证mode格式
-            if not (len(mode) == 3 and mode.isdigit()):
-                raise HTTPException(status_code=400, detail=f"无效的mode格式: {mode}，应为三位数字")
 
-            # mode模式下不需要audio和texts
-            audio_paths = []
-            prompt_text_list = []
+        # 验证音频文件
+        validate_audio_files(prompt_audio)
 
-            # 根据mode推断说话人数量
-            num_speakers = 2 if mode[0] == '1' else 1
-        else:
-            # 验证必须提供音频和文本
-            if not prompt_audio or not prompt_texts:
-                raise HTTPException(
-                    status_code=400,
-                    detail="必须提供mode参数或同时提供prompt_audio和prompt_texts"
-                )
-            # 验证音频文件
-            validate_audio_files(prompt_audio)
+        # 解析prompt_texts
+        try:
+            prompt_text_list = prompt_texts
+            if not isinstance(prompt_text_list, list):
+                raise ValueError("prompt_texts必须是JSON数组")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"prompt_texts JSON格式错误: {str(e)}")
 
-            # 解析prompt_texts
-            try:
-                prompt_text_list = prompt_texts
-                if not isinstance(prompt_text_list, list):
-                    raise ValueError("prompt_texts必须是JSON数组")
-            except json.JSONDecodeError as e:
-                raise HTTPException(status_code=400, detail=f"prompt_texts JSON格式错误: {str(e)}")
-
-            # 验证数量匹配
-            if len(prompt_audio) != len(prompt_text_list):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"参考音频数量({len(prompt_audio)})与参考文本数量({len(prompt_text_list)})不匹配"
-                )
-            num_speakers = len(prompt_audio)
-             # 保存上传的文件
-            audio_paths = []
-            for i, file in enumerate(prompt_audio):
-                path = save_upload_file(file, task_id, i)
-                audio_paths.append(str(path))
+        # 验证数量匹配
+        if len(prompt_audio) != len(prompt_text_list):
+            raise HTTPException(
+                status_code=400,
+                detail=f"参考音频数量({len(prompt_audio)})与参考文本数量({len(prompt_text_list)})不匹配"
+            )
+        
 
         # 验证对话格式
-        is_valid, error_msg = validate_dialogue_format(dialogue_text, num_speakers)
+        is_valid, error_msg = validate_dialogue_format(dialogue_text, len(prompt_audio))
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
+        
+        # 保存上传的文件
+        audio_paths = []
+        for i, file in enumerate(prompt_audio):
+            path = save_upload_file(file, task_id, i)
+            audio_paths.append(str(path))
 
 
         logger.info(f"Sync generation started: task_id={task_id}, speakers={len(audio_paths)}")
@@ -222,7 +204,6 @@ async def generate_sync(
             top_k=top_k,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
-            mode=mode,
         )
 
         # 保存结果

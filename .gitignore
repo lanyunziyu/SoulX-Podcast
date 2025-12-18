@@ -220,3 +220,5 @@ flamegraph_results/
 profiler_results/
 results/
 LICENSE
+cache
+.codelink

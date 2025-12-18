@@ -117,8 +117,8 @@ class SoulXPodcast(torch.nn.Module):
         
         # LLM generation
         inputs = list(chain.from_iterable(prompt_inputs))
-        cache_config = AutoPretrainedConfig().from_dataclass(self.llm.config.hf_config)
-        past_key_values = DynamicCache(config=cache_config)
+        # cache_config = AutoPretrainedConfig().from_dataclass(self.llm.config.hf_config)
+        # past_key_values = DynamicCache(config=cache_config)
         valid_turn_size = prompt_size
         for i in range(turn_size):
 
@@ -132,12 +132,12 @@ class SoulXPodcast(torch.nn.Module):
                     prompt_inputs[-self.config.history_context:]
                 ))
                 valid_turn_size = self.config.prompt_context + len(history_inputs) - prompt_text_bound
-                past_key_values = DynamicCache(config=cache_config)
+                # past_key_values = DynamicCache(config=cache_config)
             valid_turn_size += 1
             
             inputs.extend(text_tokens_for_llm[i])
 
-            llm_outputs = self.llm.generate(inputs, sampling_params, past_key_values=past_key_values)
+            llm_outputs = self.llm.generate(inputs, sampling_params, past_key_values=None)
 
             inputs.extend(llm_outputs['token_ids'])
             prompt_inputs.append(text_tokens_for_llm[i]+llm_outputs['token_ids'])

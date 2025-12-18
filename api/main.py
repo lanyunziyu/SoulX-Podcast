@@ -138,114 +138,114 @@ async def health_check():
     )
 
 
-@app.post("/generate", tags=["Generation"])
-async def generate_sync(
-    prompt_audio: List[UploadFile] = File(..., description="参考音频文件（1-4个）"),
-    prompt_texts: List[str] = Form(..., description="参考文本JSON数组，如: [\"文本1\", \"文本2\"]"),
-    dialogue_text: str = Form(..., description="要生成的对话文本"),
-    seed: int = Form(default=1988, description="随机种子"),
-    temperature: float = Form(default=0.6, ge=0.1, le=2.0, description="采样温度"),
-    top_k: int = Form(default=100, ge=1, le=500, description="Top-K采样"),
-    top_p: float = Form(default=0.9, ge=0.0, le=1.0, description="Top-P采样"),
-    repetition_penalty: float = Form(default=1.25, ge=1.0, le=2.0, description="重复惩罚"),
-    save_output: bool = Form(default=True, description="是否将生成的音频文件保存到磁盘"),
-):
-    """
-    同步生成语音（直接返回音频文件）
+# @app.post("/generate", tags=["Generation"])
+# async def generate_sync(
+#     prompt_audio: List[UploadFile] = File(..., description="参考音频文件（1-4个）"),
+#     prompt_texts: List[str] = Form(..., description="参考文本JSON数组，如: [\"文本1\", \"文本2\"]"),
+#     dialogue_text: str = Form(..., description="要生成的对话文本"),
+#     seed: int = Form(default=1988, description="随机种子"),
+#     temperature: float = Form(default=0.6, ge=0.1, le=2.0, description="采样温度"),
+#     top_k: int = Form(default=100, ge=1, le=500, description="Top-K采样"),
+#     top_p: float = Form(default=0.9, ge=0.0, le=1.0, description="Top-P采样"),
+#     repetition_penalty: float = Form(default=1.25, ge=1.0, le=2.0, description="重复惩罚"),
+#     save_output: bool = Form(default=True, description="是否将生成的音频文件保存到磁盘"),
+# ):
+#     """
+#     同步生成语音（直接返回音频文件）
 
-    适用于短音频生成（预计<30秒）
-    """
-    task_id = generate_task_id()
+#     适用于短音频生成（预计<30秒）
+#     """
+#     task_id = generate_task_id()
 
-    try:
-        # 如果提供了mode参数，使用预加载数据
+#     try:
+#         # 如果提供了mode参数，使用预加载数据
 
-        # 验证音频文件
-        validate_audio_files(prompt_audio)
+#         # 验证音频文件
+#         validate_audio_files(prompt_audio)
 
-        # 解析prompt_texts
-        try:
-            prompt_text_list = prompt_texts
-            if not isinstance(prompt_text_list, list):
-                raise ValueError("prompt_texts必须是JSON数组")
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"prompt_texts JSON格式错误: {str(e)}")
+#         # 解析prompt_texts
+#         try:
+#             prompt_text_list = prompt_texts
+#             if not isinstance(prompt_text_list, list):
+#                 raise ValueError("prompt_texts必须是JSON数组")
+#         except json.JSONDecodeError as e:
+#             raise HTTPException(status_code=400, detail=f"prompt_texts JSON格式错误: {str(e)}")
 
-        # 验证数量匹配
-        if len(prompt_audio) != len(prompt_text_list):
-            raise HTTPException(
-                status_code=400,
-                detail=f"参考音频数量({len(prompt_audio)})与参考文本数量({len(prompt_text_list)})不匹配"
-            )
+#         # 验证数量匹配
+#         if len(prompt_audio) != len(prompt_text_list):
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail=f"参考音频数量({len(prompt_audio)})与参考文本数量({len(prompt_text_list)})不匹配"
+#             )
         
 
-        # 验证对话格式
-        is_valid, error_msg = validate_dialogue_format(dialogue_text, len(prompt_audio))
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=error_msg)
+#         # 验证对话格式
+#         is_valid, error_msg = validate_dialogue_format(dialogue_text, len(prompt_audio))
+#         if not is_valid:
+#             raise HTTPException(status_code=400, detail=error_msg)
         
-        # 保存上传的文件
-        audio_paths = []
-        for i, file in enumerate(prompt_audio):
-            path = save_upload_file(file, task_id, i)
-            audio_paths.append(str(path))
+#         # 保存上传的文件
+#         audio_paths = []
+#         for i, file in enumerate(prompt_audio):
+#             path = save_upload_file(file, task_id, i)
+#             audio_paths.append(str(path))
 
 
-        logger.info(f"Sync generation started: task_id={task_id}, speakers={len(audio_paths)}")
+#         logger.info(f"Sync generation started: task_id={task_id}, speakers={len(audio_paths)}")
 
-        # 调用服务生成
-        service = get_service()
-        sample_rate, audio_array = service.generate(
-            prompt_audio_paths=audio_paths,
-            prompt_texts=prompt_text_list,
-            dialogue_text=dialogue_text,
-            # seed=seed,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-        )
+#         # 调用服务生成
+#         service = get_service()
+#         sample_rate, audio_array = service.generate(
+#             prompt_audio_paths=audio_paths,
+#             prompt_texts=prompt_text_list,
+#             dialogue_text=dialogue_text,
+#             # seed=seed,
+#             temperature=temperature,
+#             top_k=top_k,
+#             top_p=top_p,
+#             repetition_penalty=repetition_penalty,
+#         )
 
-        # 保存结果
-        # output_filename = f"{task_id}.wav"
-        # output_path = config.output_dir / output_filename
-        # wavfile.write(str(output_path), sample_rate, audio_array)
+#         # 保存结果
+#         # output_filename = f"{task_id}.wav"
+#         # output_path = config.output_dir / output_filename
+#         # wavfile.write(str(output_path), sample_rate, audio_array)
 
-        # logger.info(f"Sync generation completed: task_id={task_id}")
+#         # logger.info(f"Sync generation completed: task_id={task_id}")
 
-        # # 返回文件
-        # return FileResponse(
-        #     path=str(output_path),
-        #     media_type="audio/wav",
-        #     filename=output_filename
-        # )
-        if save_output:
-            # 保存结果
-            output_filename = f"{task_id}.wav"
-            output_path = config.output_dir / output_filename
-            wavfile.write(str(output_path), sample_rate, audio_array)
-            logger.info(f"Output saved to: {output_path}")
-            # 返回文件
-            return FileResponse(
-                path=str(output_path),
-                media_type="audio/wav",
-                filename=output_filename
-            )
-        else:
-            # 不保存文件，返回一个简单的 JSON 响应告知成功
-            logger.info(f"Output not saved (save_output=False). Returning success JSON.")
-            return JSONResponse(
-                content={"message": "Audio generated successfully, file not saved to disk as requested.",
-                         "sample_rate": sample_rate,
-                         "audio_length_samples": len(audio_array)},
-                status_code=200
-            )
+#         # # 返回文件
+#         # return FileResponse(
+#         #     path=str(output_path),
+#         #     media_type="audio/wav",
+#         #     filename=output_filename
+#         # )
+#         if save_output:
+#             # 保存结果
+#             output_filename = f"{task_id}.wav"
+#             output_path = config.output_dir / output_filename
+#             wavfile.write(str(output_path), sample_rate, audio_array)
+#             logger.info(f"Output saved to: {output_path}")
+#             # 返回文件
+#             return FileResponse(
+#                 path=str(output_path),
+#                 media_type="audio/wav",
+#                 filename=output_filename
+#             )
+#         else:
+#             # 不保存文件，返回一个简单的 JSON 响应告知成功
+#             logger.info(f"Output not saved (save_output=False). Returning success JSON.")
+#             return JSONResponse(
+#                 content={"message": "Audio generated successfully, file not saved to disk as requested.",
+#                          "sample_rate": sample_rate,
+#                          "audio_length_samples": len(audio_array)},
+#                 status_code=200
+#             )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Sync generation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Sync generation failed: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/generate-async", response_model=TaskCreateResponse, tags=["Generation"])
@@ -365,6 +365,145 @@ async def download_file(filename: str):
         media_type="audio/wav",
         filename=filename
     )
+
+
+@app.post("/generate-batch", tags=["Generation"])
+async def generate_batch(
+    batch_data: str = Form(..., description="批量请求数据JSON"),
+    temperature: float = Form(default=0.6, ge=0.1, le=2.0, description="采样温度"),
+    top_k: int = Form(default=100, ge=1, le=500, description="Top-K采样"),
+    top_p: float = Form(default=0.9, ge=0.0, le=1.0, description="Top-P采样"),
+    repetition_penalty: float = Form(default=1.25, ge=1.0, le=2.0, description="重复惩罚"),
+):
+    """
+    批量生成语音
+
+    接收多个请求并批量处理，提高吞吐量
+
+    batch_data格式：
+    [
+        {
+            "request_id": "req_001",
+            "prompt_audio": ["base64_encoded_audio1", ...],  # base64编码的音频
+            "prompt_texts": ["文本1", ...],
+            "dialogue_text": "[S1]你好[S2]你好"
+        },
+        ...
+    ]
+    """
+    task_id = generate_task_id()
+
+    try:
+        # 解析batch_data
+        try:
+            batch_requests_raw = json.loads(batch_data)
+            if not isinstance(batch_requests_raw, list):
+                raise ValueError("batch_data必须是数组")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"batch_data JSON格式错误: {str(e)}")
+
+        if len(batch_requests_raw) == 0:
+            raise HTTPException(status_code=400, detail="batch_data不能为空")
+
+        # 移除硬编码限制，由BatchScheduler根据显存动态管理
+        logger.info(f"Batch generation started: task_id={task_id}, batch_size={len(batch_requests_raw)}")
+
+        # 处理每个请求的音频文件
+        batch_requests = []
+        import base64
+        import io
+
+        for req_idx, req_raw in enumerate(batch_requests_raw):
+            request_id = req_raw.get("request_id", f"req_{req_idx}")
+            prompt_audio_base64 = req_raw.get("prompt_audio", [])
+            prompt_texts = req_raw.get("prompt_texts", [])
+            dialogue_text = req_raw.get("dialogue_text", "")
+
+            if not isinstance(prompt_audio_base64, list):
+                raise HTTPException(status_code=400, detail=f"请求{request_id}: prompt_audio必须是数组")
+            if not isinstance(prompt_texts, list):
+                raise HTTPException(status_code=400, detail=f"请求{request_id}: prompt_texts必须是数组")
+
+            # 验证数量匹配
+            if len(prompt_audio_base64) != len(prompt_texts):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"请求{request_id}: 音频数量({len(prompt_audio_base64)})与文本数量({len(prompt_texts)})不匹配"
+                )
+
+            # 验证对话格式
+            is_valid, error_msg = validate_dialogue_format(dialogue_text, len(prompt_audio_base64))
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=f"请求{request_id}: {error_msg}")
+
+            # 解码并保存音频文件
+            audio_paths = []
+            for audio_idx, audio_b64 in enumerate(prompt_audio_base64):
+                try:
+                    # 解码base64音频
+                    audio_bytes = base64.b64decode(audio_b64)
+
+                    # 保存临时文件
+                    temp_filename = f"{task_id}_req{req_idx}_spk{audio_idx}.wav"
+                    temp_path = config.temp_dir / temp_filename
+                    with open(temp_path, 'wb') as f:
+                        f.write(audio_bytes)
+
+                    audio_paths.append(str(temp_path))
+
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"请求{request_id}: 音频{audio_idx}解码失败: {str(e)}"
+                    )
+
+            batch_requests.append({
+                "request_id": request_id,
+                "prompt_audio_paths": audio_paths,
+                "prompt_texts": prompt_texts,
+                "dialogue_text": dialogue_text,
+            })
+
+        # 调用批处理服务
+        service = get_service()
+        batch_results = service.generate_batch(
+            batch_requests=batch_requests,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+
+        # 保存结果并返回
+        output_files = []
+        for req_idx, (sample_rate, audio_array) in enumerate(batch_results):
+            output_filename = f"{task_id}_result_{req_idx}.wav"
+            output_path = config.output_dir / output_filename
+            wavfile.write(str(output_path), sample_rate, audio_array)
+
+            output_files.append({
+                "request_id": batch_requests[req_idx]["request_id"],
+                "result_url": f"/download/{output_filename}",
+                "audio_length_seconds": len(audio_array) / sample_rate,
+            })
+
+        logger.info(f"Batch generation completed: task_id={task_id}, results={len(output_files)}")
+
+        return JSONResponse(
+            content={
+                "task_id": task_id,
+                "batch_size": len(output_files),
+                "results": output_files,
+                "message": "批量生成成功"
+            },
+            status_code=200
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Batch generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.exception_handler(Exception)

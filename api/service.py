@@ -18,6 +18,7 @@ import threading
 import s3tokenizer
 
 from soulxpodcast.models.soulxpodcast import SoulXPodcast
+from soulxpodcast.models.soulxpodcast_batch import SoulXPodcastBatch
 from soulxpodcast.config import Config, SoulXPodcastLLMConfig, SamplingParams
 from soulxpodcast.utils.dataloader import PodcastInferHandler
 
@@ -48,6 +49,9 @@ class SoulXPodcastService:
         self._load_model()
         logger.info("Initializing SoulXPodcastService (first time)")
         self._init_cache_system()
+
+        # 初始化批处理模型（懒加载）
+        self.batch_model = None
 
     def _load_model(self):
         """加载模型"""
@@ -210,203 +214,475 @@ class SoulXPodcastService:
                 logger.warning(f"Failed to save cache to {cache_file}: {e}")
 
 
-    def generate(
+    # def generate(
+    #     self,
+    #     prompt_audio_paths: List[str],
+    #     prompt_texts: List[str],
+    #     dialogue_text: str,
+    #     # seed: int = 1988,
+    #     temperature: float = 0.6,
+    #     top_k: int = 100,
+    #     top_p: float = 0.9,
+    #     repetition_penalty: float = 1.25,
+    #     dialect_prompt_texts: Optional[List[str]] = None,
+    # ) -> Tuple[int, np.ndarray]:
+    #     """
+    #     生成语音
+
+    #     Args:
+    #         prompt_audio_paths: 参考音频路径列表
+    #         prompt_texts: 参考文本列表
+    #         dialogue_text: 对话文本
+    #         seed: 随机种子
+    #         temperature: 采样温度
+    #         top_k: Top-K采样
+    #         top_p: Top-P采样
+    #         repetition_penalty: 重复惩罚
+    #         dialect_prompt_texts: 方言提示文本列表（可选）
+
+    #     Returns:
+    #         Tuple[int, np.ndarray]: (采样率, 音频数组)
+    #     """
+    #     logger.info(f"Generate called - Instance ID: {id(self)}, Model loaded: {self.is_loaded()}")
+
+    #     if not self.is_loaded():
+    #         raise RuntimeError("模型未加载")
+
+    #     # 使用锁确保同一时间只有一个生成任务
+    #     # with self._generation_lock:
+    #     # logger.info("Acquired generation lock")
+    #     start_time = time.time()
+    #     try:
+    #         # 设置随机种子
+    #         # torch.manual_seed(seed)
+    #         # np.random.seed(seed)
+    #         # random.seed(seed)
+
+    #         seed=0
+    #         torch.manual_seed(seed)
+    #         np.random.seed(seed)
+    #         torch.cuda.manual_seed(seed)
+    #         torch.backends.cudnn.deterministic = True
+    #         torch.backends.cudnn.benchmark = False
+    #         dataset_time_end = time.time()
+
+
+    #         num_speakers = len(prompt_audio_paths)
+    #         logger.info(f"Generating audio for {num_speakers} speaker(s)")
+
+    #         # 解析对话文本
+    #         target_text_list = parse_dialogue_text(dialogue_text, num_speakers)
+    #         logger.info(f"Parsed dialogue into {len(target_text_list)} segments")
+
+    #         # 提取说话人和文本
+    #         spks, texts = [], []
+    #         for target_text in target_text_list:
+    #             pattern = r'(\[S[1-9]\])(.+)'
+    #             match = re.match(pattern, target_text)
+    #             if match:
+    #                 text, spk = match.group(2), int(match.group(1)[2]) - 1
+    #                 spks.append(spk)
+    #                 texts.append(text)
+    #             else:
+    #                 raise ValueError(f"无效的对话文本格式: {target_text}")
+                
+    #         use_dialect_prompt = dialect_prompt_texts is not None and len(dialect_prompt_texts) > 0
+    #         cached_features_list = []
+    #         need_processing = []  # 需要处理的索引
+
+    #         for i, (audio_path, prompt_text) in enumerate(zip(prompt_audio_paths, prompt_texts)):
+    #             dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
+    #             cache_key = self._get_cache_key(audio_path, prompt_text, dialect_text)
+
+    #             cached = self._load_from_cache(cache_key)
+    #             if cached:
+    #                 cached_features_list.append(cached)
+    #                 logger.info(f"Using cached features for speaker {i}")
+    #             else:
+    #                 cached_features_list.append(None)
+    #                 need_processing.append(i)
+    #                 logger.info(f"Cache miss for speaker {i}, will process")
+
+    #         # 如果有需要处理的，批量处理
+    #         if need_processing:
+    #             logger.info(f"Processing {len(need_processing)} speakers without cache")
+
+    #             # 构建数据项
+    #             dataitem = {
+    #                 "key": "api_001",
+    #                 "prompt_text": prompt_texts,
+    #                 "prompt_wav": prompt_audio_paths,
+    #                 "text": texts,
+    #                 "spk": spks,
+    #             }
+
+    #             if use_dialect_prompt:
+    #                 dataitem["dialect_prompt_text"] = dialect_prompt_texts
+
+    #             # 更新数据源并处理
+    #             self.dataset.update_datasource([dataitem])
+    #             data = self.dataset[0]
+
+    #             # 提取并缓存新处理的特征
+    #             for i in need_processing:
+    #                 dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
+    #                 cache_key = self._get_cache_key(prompt_audio_paths[i], prompt_texts[i], dialect_text)
+
+    #                 # 保存单个speaker的特征
+    #                 speaker_features = {
+    #                     "prompt_text_tokens": data["prompt_text_tokens"][i],
+    #                     "spk_emb": data["spk_emb"][i],
+    #                     "mel": data["mel"][i],
+    #                     "mel_len": data["mel_len"][i],
+    #                     "log_mel": data["log_mel"][i],
+    #                 }
+    #                 if use_dialect_prompt:
+    #                     speaker_features["dialect_prompt_text_tokens"] = data["dialect_prompt_text_tokens"][i]
+
+    #                 self._save_to_cache(cache_key, speaker_features)
+    #                 cached_features_list[i] = speaker_features
+
+    #             # 使用处理好的data
+    #         else:
+    #             # 全部来自缓存，重新组装data
+    #             logger.info("All speakers loaded from cache, reconstructing data")
+
+    #             from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
+    #             from soulxpodcast.utils.text import normalize_text
+
+    #             # 处理目标文本tokens
+    #             text_ids_list, spks_list = [], []
+    #             for text, spk in zip(texts, spks):
+    #                 text = normalize_text(text)
+    #                 text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
+    #                 text_ids = self.model.llm.tokenizer.encode(text)
+    #                 text_ids_list.append(text_ids)
+    #                 spks_list.append(spk)
+
+    #             # 从缓存重建data
+    #             data = {
+    #                 "log_mel": [f["log_mel"] for f in cached_features_list],
+    #                 "spk_emb": [f["spk_emb"] for f in cached_features_list],
+    #                 "mel": [f["mel"] for f in cached_features_list],
+    #                 "mel_len": [f["mel_len"] for f in cached_features_list],
+    #                 "prompt_text_tokens": [f["prompt_text_tokens"] for f in cached_features_list],
+    #                 "text_tokens": text_ids_list,
+    #                 "spks_list": spks_list,
+    #                 "info": {
+    #                     "key": "api_cached",
+    #                     "prompt_text": prompt_texts,
+    #                     "prompt_wav": prompt_audio_paths,
+    #                     "text": texts,
+    #                     "spk": spks,
+    #                 }
+    #             }
+
+    #             if use_dialect_prompt:
+    #                 data["dialect_prompt_text_tokens"] = [f["dialect_prompt_text_tokens"] for f in cached_features_list]
+    #                 data["use_dialect_prompt"] = True
+                
+    #         # # 构建数据项
+    #         # dataitem = {
+    #         #     "key": "api_001",
+    #         #     "prompt_text": prompt_texts,
+    #         #     "prompt_wav": prompt_audio_paths,
+    #         #     "text": texts,
+    #         #     "spk": spks,
+    #         # }
+    #         # # 更新数据源
+    #         # self.dataset.update_datasource([dataitem])
+    #         # dataset_time = time.time()
+    #         # # 获取处理后的数据
+    #         # data = self.dataset[0]
+    #         # dataset_time_end = time.time()
+    #         # logger.info(f"self.dataset[0] time: {dataset_time_end-dataset_time:.4f}s")            
+
+    #         # 准备模型输入
+    #         prompt_mels_for_llm, prompt_mels_lens_for_llm = s3tokenizer.padding(data["log_mel"])
+    #         s3tokenizer_padding = time.time()
+    #         logger.info(f"s3tokenizer_padding time: {s3tokenizer_padding-dataset_time_end:.4f}s")
+
+    #         spk_emb_for_flow = torch.tensor(data["spk_emb"])
+    #         prompt_mels_for_flow = torch.nn.utils.rnn.pad_sequence(
+    #             data["mel"], batch_first=True, padding_value=0
+    #         )
+
+    #         prompt_mels_lens_for_flow = torch.tensor(data['mel_len'])
+    #         text_tokens_for_llm = data["text_tokens"]
+    #         prompt_text_tokens_for_llm = data["prompt_text_tokens"]
+    #         spk_ids = data["spks_list"]
+
+    #         # 采样参数
+    #         sampling_params = SamplingParams(
+    #             temperature=temperature,
+    #             repetition_penalty=repetition_penalty,
+    #             top_k=top_k,
+    #             top_p=top_p,
+    #             extra_args={
+    #                 "use_ras":True,
+    #                 "win_size":25,
+    #                 "tau_r":0.2,
+    #             },
+    #         )
+
+    #         infos = [data["info"]]
+    #         processed_data = {
+    #             "prompt_mels_for_llm": prompt_mels_for_llm,
+    #             "prompt_mels_lens_for_llm": prompt_mels_lens_for_llm,
+    #             "prompt_text_tokens_for_llm": prompt_text_tokens_for_llm,
+    #             "text_tokens_for_llm": text_tokens_for_llm,
+    #             "prompt_mels_for_flow_ori": prompt_mels_for_flow,
+    #             "prompt_mels_lens_for_flow": prompt_mels_lens_for_flow,
+    #             "spk_emb_for_flow": spk_emb_for_flow,
+    #             "sampling_params": sampling_params,
+    #             "spk_ids": spk_ids,
+    #             "infos": infos,
+    #             "use_dialect_prompt": False,
+    #         }
+
+    #         generation_time = time.time()
+    #         logger.info(f"DataLoader time: {generation_time-start_time:.4f}s")
+    #         # 模型推理
+    #         logger.info("Running model inference...")
+
+    #         # 清理之前可能累积的GPU缓存
+    #         # if torch.cuda.is_available():
+    #         #     torch.cuda.empty_cache()
+
+    #         # 设置超时时间（根据音频长度动态调整）
+    #         num_segments = len(texts)
+    #         timeout_seconds = max(1200, num_segments * 12000)  # 每段至少120秒，最少20分钟(1200秒)
+
+    #         logger.info(f"Starting inference with timeout: {timeout_seconds}s for {num_segments} segments")
+
+    #         with torch.no_grad():
+    #             results_dict = self.model.forward_longform(**processed_data)
+
+    #         # 使用线程池执行推理
+    #         # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    #         #     future = executor.submit(run_inference)
+    #         #     try:
+    #         #         results_dict = future.result(timeout=timeout_seconds)
+    #         #     except concurrent.futures.TimeoutError:
+    #         #         logger.error(f"Model inference timeout after {timeout_seconds} seconds")
+    #         #         # 尝试取消任务
+    #         #         future.cancel()
+    #         #         # 清理GPU内存
+    #         #         if torch.cuda.is_available():
+    #         #             torch.cuda.empty_cache()
+    #         #         raise TimeoutError(f"模型推理超时（{timeout_seconds}秒）。可能是音频过长或GPU内存不足。")
+    #         #     except Exception as e:
+    #         #         logger.error(f"Model inference failed: {e}")
+    #         #         raise RuntimeError(f"模型推理失败: {str(e)}")
+    #         genera = time.time()
+    #         logger.info(f"genera totcl time: {genera-generation_time:.4f}s")
+    #         # 拼接音频
+    #         target_audio = None
+    #         for i in range(len(results_dict['generated_wavs'])):
+    #             if target_audio is None:
+    #                 target_audio = results_dict['generated_wavs'][i]
+    #             else:
+    #                 target_audio = torch.concat(
+    #                     [target_audio, results_dict['generated_wavs'][i]], axis=1
+    #                 )
+
+    #         # 转换为numpy数组
+    #         audio_array = target_audio.cpu().squeeze(0).numpy()
+    #         sample_rate = 24000
+    #         audio_array_time = time.time()
+    #         logger.info(f"audio_array_time time: {audio_array_time-genera:.4f}s")
+    #         # 清理GPU内存
+    #         del target_audio
+    #         del results_dict
+    #         if 'processed_data' in locals():
+    #             del processed_data
+
+    #         logger.info(f"Audio generation completed. Duration: {len(audio_array) / sample_rate:.2f}s")
+
+    #         allocated_time = time.time()
+    #         logger.info(f"GPU sys time: {allocated_time-audio_array_time:.4f}s")
+
+    #         end_time = time.time()
+    #         execution_time = end_time - start_time
+    #         logger.info(f"Generation execution time: {execution_time:.3f} seconds")
+
+    #         return sample_rate, audio_array
+
+    #     except Exception as e:
+    #         logger.error(f"Generation failed: {e}", exc_info=True)
+    #         raise RuntimeError(f"语音生成失败: {str(e)}")
+    #     # finally:
+    #     #     logger.info("Released generation lock")
+
+    def _load_batch_model(self):
+        """懒加载批处理模型"""
+        if self.batch_model is None:
+            logger.info("Loading batch processing model...")
+            self.batch_model = SoulXPodcastBatch(self.config)
+            logger.info("Batch model loaded successfully")
+
+    def generate_batch(
         self,
-        prompt_audio_paths: List[str],
-        prompt_texts: List[str],
-        dialogue_text: str,
-        # seed: int = 1988,
+        batch_requests: List[Dict[str, Any]],
         temperature: float = 0.6,
         top_k: int = 100,
         top_p: float = 0.9,
         repetition_penalty: float = 1.25,
-        dialect_prompt_texts: Optional[List[str]] = None,
-    ) -> Tuple[int, np.ndarray]:
+    ) -> List[Tuple[int, np.ndarray]]:
         """
-        生成语音
+        批量生成语音
 
         Args:
-            prompt_audio_paths: 参考音频路径列表
-            prompt_texts: 参考文本列表
-            dialogue_text: 对话文本
-            seed: 随机种子
+            batch_requests: 批量请求列表
+                [{
+                    "prompt_audio_paths": List[str],
+                    "prompt_texts": List[str],
+                    "dialogue_text": str,
+                }, ...]
             temperature: 采样温度
             top_k: Top-K采样
             top_p: Top-P采样
             repetition_penalty: 重复惩罚
-            dialect_prompt_texts: 方言提示文本列表（可选）
 
         Returns:
-            Tuple[int, np.ndarray]: (采样率, 音频数组)
+            List[Tuple[int, np.ndarray]]: 批量结果 [(采样率, 音频数组), ...]
         """
-        logger.info(f"Generate called - Instance ID: {id(self)}, Model loaded: {self.is_loaded()}")
+        logger.info(f"Batch generate called with {len(batch_requests)} requests")
 
         if not self.is_loaded():
             raise RuntimeError("模型未加载")
 
-        # 使用锁确保同一时间只有一个生成任务
-        # with self._generation_lock:
-        # logger.info("Acquired generation lock")
+        # 懒加载批处理模型
+        self._load_batch_model()
+
         start_time = time.time()
+        batch_size = len(batch_requests)
+
         try:
             # 设置随机种子
-            # torch.manual_seed(seed)
-            # np.random.seed(seed)
-            # random.seed(seed)
-
-            seed=0
+            seed = 0
             torch.manual_seed(seed)
             np.random.seed(seed)
             torch.cuda.manual_seed(seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-            dataset_time_end = time.time()
 
+            # 准备批量数据
+            logger.info("Preparing batch data...")
+            batch_data = []
 
-            num_speakers = len(prompt_audio_paths)
-            logger.info(f"Generating audio for {num_speakers} speaker(s)")
+            for req_idx, req in enumerate(batch_requests):
+                prompt_audio_paths = req["prompt_audio_paths"]
+                prompt_texts = req["prompt_texts"]
+                dialogue_text = req["dialogue_text"]
+                dialect_prompt_texts = req.get("dialect_prompt_texts", None)
 
-            # 解析对话文本
-            target_text_list = parse_dialogue_text(dialogue_text, num_speakers)
-            logger.info(f"Parsed dialogue into {len(target_text_list)} segments")
+                num_speakers = len(prompt_audio_paths)
+                logger.info(f"Request {req_idx}: {num_speakers} speaker(s)")
 
-            # 提取说话人和文本
-            spks, texts = [], []
-            for target_text in target_text_list:
-                pattern = r'(\[S[1-9]\])(.+)'
-                match = re.match(pattern, target_text)
-                if match:
-                    text, spk = match.group(2), int(match.group(1)[2]) - 1
-                    spks.append(spk)
-                    texts.append(text)
-                else:
-                    raise ValueError(f"无效的对话文本格式: {target_text}")
-                
-            use_dialect_prompt = dialect_prompt_texts is not None and len(dialect_prompt_texts) > 0
-            cached_features_list = []
-            need_processing = []  # 需要处理的索引
+                # 解析对话文本
+                target_text_list = parse_dialogue_text(dialogue_text, num_speakers)
 
-            for i, (audio_path, prompt_text) in enumerate(zip(prompt_audio_paths, prompt_texts)):
-                dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
-                cache_key = self._get_cache_key(audio_path, prompt_text, dialect_text)
+                # 提取说话人和文本
+                spks, texts = [], []
+                for target_text in target_text_list:
+                    pattern = r'(\[S[1-9]\])(.+)'
+                    match = re.match(pattern, target_text)
+                    if match:
+                        text, spk = match.group(2), int(match.group(1)[2]) - 1
+                        spks.append(spk)
+                        texts.append(text)
+                    else:
+                        raise ValueError(f"无效的对话文本格式: {target_text}")
 
-                cached = self._load_from_cache(cache_key)
-                if cached:
-                    cached_features_list.append(cached)
-                    logger.info(f"Using cached features for speaker {i}")
-                else:
-                    cached_features_list.append(None)
-                    need_processing.append(i)
-                    logger.info(f"Cache miss for speaker {i}, will process")
+                # 处理prompt特征（使用缓存）
+                use_dialect_prompt = dialect_prompt_texts is not None and len(dialect_prompt_texts) > 0
+                cached_features_list = []
+                need_processing = []
 
-            # 如果有需要处理的，批量处理
-            if need_processing:
-                logger.info(f"Processing {len(need_processing)} speakers without cache")
-
-                # 构建数据项
-                dataitem = {
-                    "key": "api_001",
-                    "prompt_text": prompt_texts,
-                    "prompt_wav": prompt_audio_paths,
-                    "text": texts,
-                    "spk": spks,
-                }
-
-                if use_dialect_prompt:
-                    dataitem["dialect_prompt_text"] = dialect_prompt_texts
-
-                # 更新数据源并处理
-                self.dataset.update_datasource([dataitem])
-                data = self.dataset[0]
-
-                # 提取并缓存新处理的特征
-                for i in need_processing:
+                for i, (audio_path, prompt_text) in enumerate(zip(prompt_audio_paths, prompt_texts)):
                     dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
-                    cache_key = self._get_cache_key(prompt_audio_paths[i], prompt_texts[i], dialect_text)
+                    cache_key = self._get_cache_key(audio_path, prompt_text, dialect_text)
 
-                    # 保存单个speaker的特征
-                    speaker_features = {
-                        "prompt_text_tokens": data["prompt_text_tokens"][i],
-                        "spk_emb": data["spk_emb"][i],
-                        "mel": data["mel"][i],
-                        "mel_len": data["mel_len"][i],
-                        "log_mel": data["log_mel"][i],
-                    }
-                    if use_dialect_prompt:
-                        speaker_features["dialect_prompt_text_tokens"] = data["dialect_prompt_text_tokens"][i]
+                    cached = self._load_from_cache(cache_key)
+                    if cached:
+                        cached_features_list.append(cached)
+                    else:
+                        cached_features_list.append(None)
+                        need_processing.append(i)
 
-                    self._save_to_cache(cache_key, speaker_features)
-                    cached_features_list[i] = speaker_features
-
-                # 使用处理好的data
-            else:
-                # 全部来自缓存，重新组装data
-                logger.info("All speakers loaded from cache, reconstructing data")
-
-                from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
-                from soulxpodcast.utils.text import normalize_text
-
-                # 处理目标文本tokens
-                text_ids_list, spks_list = [], []
-                for text, spk in zip(texts, spks):
-                    text = normalize_text(text)
-                    text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
-                    text_ids = self.model.llm.tokenizer.encode(text)
-                    text_ids_list.append(text_ids)
-                    spks_list.append(spk)
-
-                # 从缓存重建data
-                data = {
-                    "log_mel": [f["log_mel"] for f in cached_features_list],
-                    "spk_emb": [f["spk_emb"] for f in cached_features_list],
-                    "mel": [f["mel"] for f in cached_features_list],
-                    "mel_len": [f["mel_len"] for f in cached_features_list],
-                    "prompt_text_tokens": [f["prompt_text_tokens"] for f in cached_features_list],
-                    "text_tokens": text_ids_list,
-                    "spks_list": spks_list,
-                    "info": {
-                        "key": "api_cached",
+                # 如果有需要处理的，批量处理
+                if need_processing:
+                    dataitem = {
+                        "key": f"api_batch_{req_idx}",
                         "prompt_text": prompt_texts,
                         "prompt_wav": prompt_audio_paths,
                         "text": texts,
                         "spk": spks,
                     }
-                }
 
-                if use_dialect_prompt:
-                    data["dialect_prompt_text_tokens"] = [f["dialect_prompt_text_tokens"] for f in cached_features_list]
-                    data["use_dialect_prompt"] = True
-                
-            # # 构建数据项
-            # dataitem = {
-            #     "key": "api_001",
-            #     "prompt_text": prompt_texts,
-            #     "prompt_wav": prompt_audio_paths,
-            #     "text": texts,
-            #     "spk": spks,
-            # }
-            # # 更新数据源
-            # self.dataset.update_datasource([dataitem])
-            # dataset_time = time.time()
-            # # 获取处理后的数据
-            # data = self.dataset[0]
-            # dataset_time_end = time.time()
-            # logger.info(f"self.dataset[0] time: {dataset_time_end-dataset_time:.4f}s")            
+                    if use_dialect_prompt:
+                        dataitem["dialect_prompt_text"] = dialect_prompt_texts
 
-            # 准备模型输入
-            prompt_mels_for_llm, prompt_mels_lens_for_llm = s3tokenizer.padding(data["log_mel"])
-            s3tokenizer_padding = time.time()
-            logger.info(f"s3tokenizer_padding time: {s3tokenizer_padding-dataset_time_end:.4f}s")
+                    self.dataset.update_datasource([dataitem])
+                    data = self.dataset[0]
 
-            spk_emb_for_flow = torch.tensor(data["spk_emb"])
-            prompt_mels_for_flow = torch.nn.utils.rnn.pad_sequence(
-                data["mel"], batch_first=True, padding_value=0
-            )
+                    # 缓存新处理的特征
+                    for i in need_processing:
+                        dialect_text = dialect_prompt_texts[i] if use_dialect_prompt else None
+                        cache_key = self._get_cache_key(prompt_audio_paths[i], prompt_texts[i], dialect_text)
 
-            prompt_mels_lens_for_flow = torch.tensor(data['mel_len'])
-            text_tokens_for_llm = data["text_tokens"]
-            prompt_text_tokens_for_llm = data["prompt_text_tokens"]
-            spk_ids = data["spks_list"]
+                        speaker_features = {
+                            "prompt_text_tokens": data["prompt_text_tokens"][i],
+                            "spk_emb": data["spk_emb"][i],
+                            "mel": data["mel"][i],
+                            "mel_len": data["mel_len"][i],
+                            "log_mel": data["log_mel"][i],
+                        }
+                        if use_dialect_prompt:
+                            speaker_features["dialect_prompt_text_tokens"] = data["dialect_prompt_text_tokens"][i]
+
+                        self._save_to_cache(cache_key, speaker_features)
+                        cached_features_list[i] = speaker_features
+                else:
+                    # 全部来自缓存，重建data
+                    from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
+                    from soulxpodcast.utils.text import normalize_text
+
+                    text_ids_list, spks_list = [], []
+                    for text, spk in zip(texts, spks):
+                        text = normalize_text(text)
+                        text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
+                        text_ids = self.model.llm.tokenizer.encode(text)
+                        text_ids_list.append(text_ids)
+                        spks_list.append(spk)
+
+                    data = {
+                        "log_mel": [f["log_mel"] for f in cached_features_list],
+                        "spk_emb": [f["spk_emb"] for f in cached_features_list],
+                        "mel": [f["mel"] for f in cached_features_list],
+                        "mel_len": [f["mel_len"] for f in cached_features_list],
+                        "prompt_text_tokens": [f["prompt_text_tokens"] for f in cached_features_list],
+                        "text_tokens": text_ids_list,
+                        "spks_list": spks_list,
+                    }
+
+                # 准备批处理数据
+                prompt_mels_for_llm, prompt_mels_lens_for_llm = s3tokenizer.padding(data["log_mel"])
+                spk_emb_for_flow = torch.tensor(data["spk_emb"])
+                prompt_mels_for_flow = torch.nn.utils.rnn.pad_sequence(
+                    data["mel"], batch_first=True, padding_value=0
+                )
+
+                batch_data.append({
+                    "prompt_mels_for_llm": prompt_mels_for_llm,
+                    "prompt_mels_lens_for_llm": prompt_mels_lens_for_llm,
+                    "prompt_text_tokens_for_llm": data["prompt_text_tokens"],
+                    "text_tokens_for_llm": data["text_tokens"],
+                    "prompt_mels_for_flow": prompt_mels_for_flow,
+                    "spk_emb_for_flow": spk_emb_for_flow,
+                    "spk_ids": data["spks_list"],
+                })
 
             # 采样参数
             sampling_params = SamplingParams(
@@ -415,100 +691,29 @@ class SoulXPodcastService:
                 top_k=top_k,
                 top_p=top_p,
                 extra_args={
-                    "use_ras":True,
-                    "win_size":25,
-                    "tau_r":0.2,
+                    "use_ras": True,
+                    "win_size": 25,
+                    "tau_r": 0.2,
                 },
             )
 
-            infos = [data["info"]]
-            processed_data = {
-                "prompt_mels_for_llm": prompt_mels_for_llm,
-                "prompt_mels_lens_for_llm": prompt_mels_lens_for_llm,
-                "prompt_text_tokens_for_llm": prompt_text_tokens_for_llm,
-                "text_tokens_for_llm": text_tokens_for_llm,
-                "prompt_mels_for_flow_ori": prompt_mels_for_flow,
-                "prompt_mels_lens_for_flow": prompt_mels_lens_for_flow,
-                "spk_emb_for_flow": spk_emb_for_flow,
-                "sampling_params": sampling_params,
-                "spk_ids": spk_ids,
-                "infos": infos,
-                "use_dialect_prompt": False,
-            }
+            # 批量处理
+            logger.info(f"Running batch inference for {batch_size} requests...")
+            batch_results = self.batch_model.forward_batch(batch_data, sampling_params)
 
-            generation_time = time.time()
-            logger.info(f"DataLoader time: {generation_time-start_time:.4f}s")
-            # 模型推理
-            logger.info("Running model inference...")
+            # 整理输出
+            outputs = []
+            for result in batch_results:
+                outputs.append((result["sample_rate"], result["audio"]))
 
-            # 清理之前可能累积的GPU缓存
-            # if torch.cuda.is_available():
-            #     torch.cuda.empty_cache()
+            total_time = time.time() - start_time
+            logger.info(f"Batch generation completed in {total_time:.4f}s, avg={total_time/batch_size:.4f}s per request")
 
-            # 设置超时时间（根据音频长度动态调整）
-            num_segments = len(texts)
-            timeout_seconds = max(1200, num_segments * 12000)  # 每段至少120秒，最少20分钟(1200秒)
-
-            logger.info(f"Starting inference with timeout: {timeout_seconds}s for {num_segments} segments")
-
-            with torch.no_grad():
-                results_dict = self.model.forward_longform(**processed_data)
-
-            # 使用线程池执行推理
-            # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            #     future = executor.submit(run_inference)
-            #     try:
-            #         results_dict = future.result(timeout=timeout_seconds)
-            #     except concurrent.futures.TimeoutError:
-            #         logger.error(f"Model inference timeout after {timeout_seconds} seconds")
-            #         # 尝试取消任务
-            #         future.cancel()
-            #         # 清理GPU内存
-            #         if torch.cuda.is_available():
-            #             torch.cuda.empty_cache()
-            #         raise TimeoutError(f"模型推理超时（{timeout_seconds}秒）。可能是音频过长或GPU内存不足。")
-            #     except Exception as e:
-            #         logger.error(f"Model inference failed: {e}")
-            #         raise RuntimeError(f"模型推理失败: {str(e)}")
-            genera = time.time()
-            logger.info(f"genera totcl time: {genera-generation_time:.4f}s")
-            # 拼接音频
-            target_audio = None
-            for i in range(len(results_dict['generated_wavs'])):
-                if target_audio is None:
-                    target_audio = results_dict['generated_wavs'][i]
-                else:
-                    target_audio = torch.concat(
-                        [target_audio, results_dict['generated_wavs'][i]], axis=1
-                    )
-
-            # 转换为numpy数组
-            audio_array = target_audio.cpu().squeeze(0).numpy()
-            sample_rate = 24000
-            audio_array_time = time.time()
-            logger.info(f"audio_array_time time: {audio_array_time-genera:.4f}s")
-            # 清理GPU内存
-            del target_audio
-            del results_dict
-            if 'processed_data' in locals():
-                del processed_data
-
-            logger.info(f"Audio generation completed. Duration: {len(audio_array) / sample_rate:.2f}s")
-
-            allocated_time = time.time()
-            logger.info(f"GPU sys time: {allocated_time-audio_array_time:.4f}s")
-
-            end_time = time.time()
-            execution_time = end_time - start_time
-            logger.info(f"Generation execution time: {execution_time:.3f} seconds")
-
-            return sample_rate, audio_array
+            return outputs
 
         except Exception as e:
-            logger.error(f"Generation failed: {e}", exc_info=True)
-            raise RuntimeError(f"语音生成失败: {str(e)}")
-        # finally:
-        #     logger.info("Released generation lock")
+            logger.error(f"Batch generation failed: {e}", exc_info=True)
+            raise RuntimeError(f"批量语音生成失败: {str(e)}")
 
 
 # 全局服务实例

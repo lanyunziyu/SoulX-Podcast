@@ -881,7 +881,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
         self.final_block = CausalBlock1D(channels[-1], channels[-1])
         self.final_proj = nn.Conv1d(channels[-1], self.out_channels, 1)
         self.initialize_weights()
-    @torch.compile(mode="max-autotune-no-cudagraphs")
+    # @torch.compile(mode="max-autotune-no-cudagraphs")
     def forward(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
         """Forward pass of the UNet1DConditional model.
 

@@ -210,8 +210,15 @@ class PodcastInferHandler(PodcastDataset):
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         option.intra_op_num_threads = 1
+        providers = [
+            ('CUDAExecutionProvider', {
+                'arena_extend_strategy': 'kSameAsRequested',
+                'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                'do_copy_in_default_stream': True,
+            })
+        ]
         self.spk_model = onnxruntime.InferenceSession(f"{self.model_config.model}/campplus.onnx", sess_options=option,
-                                                    providers=["CPUExecutionProvider"])
+                                                    providers=providers)
 
     def update_datasource(self, data_list):
         self.datas = data_list

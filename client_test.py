@@ -70,7 +70,7 @@ def test_sync_single_speaker(api_url: str):
         files['prompt_audio'].close()
 
 
-def test_sync_with_mode(api_url: str, mode: str = "110"):
+def test_sync_with_mode(api_url: str, mode: str = "010"):
     """测试同步生成 - 使用mode参数（预加载数据）"""
     print("\n" + "=" * 60)
     print(f"测试: 同步生成 - 使用mode={mode}")
@@ -90,7 +90,7 @@ def test_sync_with_mode(api_url: str, mode: str = "110"):
 
     # 根据模式准备对话文本
     if mode[0] == '0':  # 单人
-        dialogue_text = '[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。'
+        dialogue_text = '[S1]大家好，欢迎收听今天的节目。[S1]今天我们要聊一聊[S1]人工智能的最新进展。'
     else:  # 双人
         dialogue_text = '[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
 

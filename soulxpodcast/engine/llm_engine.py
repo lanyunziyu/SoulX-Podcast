@@ -4,7 +4,7 @@ import atexit
 from time import perf_counter
 from functools import partial
 from dataclasses import fields, asdict
-
+import time
 import torch
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteriaList
@@ -17,6 +17,7 @@ try:
 except ImportError:
     SUPPORT_VLLM = True
 
+import logging
 from soulxpodcast.config import Config, SamplingParams
 from soulxpodcast.models.modules.sampler import _ras_sample_hf_engine
 
@@ -106,16 +107,26 @@ class VLLMEngine:
         vllm_params.pop('use_ras', None)
         vllm_params.pop('win_size', None)
         vllm_params.pop('tau_r', None)
+        if isinstance(prompt[0], list):
+                # 说明是 Batch 输入: [[...], [...]]
+            vllm_inputs = [TokensPrompt(prompt_token_ids=p) for p in prompt]
+        else:
+            # 说明是单条输入: [id, id, id...]
+            vllm_inputs = TokensPrompt(prompt_token_ids=prompt)
         with torch.no_grad():
-            generated_ids = self.model.generate(
-                TokensPrompt(prompt_token_ids=prompt),
+            outputs = self.model.generate(
+                vllm_inputs,
                 VllmSamplingParams(**vllm_params),
                 use_tqdm=False,
-            )[0].outputs[0].token_ids
+            )
+        generated_ids_list = [out.outputs[0].token_ids for out in outputs]
         # print(list(generated_ids))
+        start_time = time.time()
         output = {
-            "text": self.tokenizer.decode(generated_ids),
-            "token_ids": list(generated_ids),
+            "text": self.tokenizer.batch_decode(generated_ids_list, skip_special_tokens=True),
+            "token_ids": generated_ids_list,
         }
+        batch_decode_time = time.time()
+        logging.info(f"batch decode time {batch_decode_time-start_time:.4f} seconds")
         # print(output["text"])
         return output

@@ -205,7 +205,7 @@ class HiFTGenerator(nn.Module):
                                         self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device))
         return inverse_transform
     
-    @torch.compile(mode="max-autotune-no-cudagraphs")
+    # @torch.compile(mode="max-autotune-no-cudagraphs")
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
         s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)

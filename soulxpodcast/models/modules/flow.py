@@ -185,7 +185,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             conds[i, :j] = prompt_feat[i, :j]
         conds = conds.transpose(1, 2)
 
-        h_lengths = h_lengths.sum(dim=-1).squeeze(dim=1)
+        h_lengths = h_lengths.sum(dim=-1)#.squeeze(dim=1)
         mask = (~make_pad_mask(h_lengths, max_len=h.shape[1])).to(h)
         feat, _ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),

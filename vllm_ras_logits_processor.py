@@ -355,7 +355,7 @@ class FixedRASLogitsProcessor(LogitsProcessor):
         next_token_ids_b: torch.Tensor,
         window_size: int,
         threshold: float
-    ) -> bool:
+    ) -> torch.Tensor:
         """
         V0精确逻辑复制 - 严格按照utils.py:52-58实现
 
@@ -378,15 +378,15 @@ class FixedRASLogitsProcessor(LogitsProcessor):
         """
         # V0 Line 53: window_size = min(window_size, input_ids.shape[1])
         window_size = min(window_size, input_ids.shape[1])
-
+        target_window = input_ids[:, -window_size:]
+        comparison = (target_window == next_token_ids_b.unsqueeze(1))
+        rep_num = comparison.sum(dim=1) + 1
         # V0 Line 54: rep_num = (input_ids[:,-window_size:] == next_token_ids_b).sum().item() + 1
-        rep_num = (input_ids[:, -window_size:] == next_token_ids_b).sum().item() + 1
+        # rep_num = (input_ids[:, -window_size:] == next_token_ids_b).sum().item() + 1
 
         # V0 Line 55-58: if rep_num >= window_size * thre: return True else: return False
-        if rep_num >= window_size * threshold:
-            return True
-        else:
-            return False
+        return rep_num >= window_size * threshold
+ 
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """
@@ -466,12 +466,16 @@ class FixedRASLogitsProcessor(LogitsProcessor):
 
             # V1 RAS适配：如果检测到重复，使用RAS惩罚机制
             # V0会回退到original_logits，但V1中我们只能通过RAS惩罚来防止重复采样
-            if is_origin:
-                for i, req_idx in enumerate(valid_requests):
-                    candidate_token = candidate_tokens[i].item()
-                    # RAS惩罚：大幅降低重复token的logits，强制采样其他token
-                    # 这实现了与V0相同的"避免重复采样"效果
-                    logits[req_idx, candidate_token] = float('-inf')  # 完全屏蔽重复token
+            penalty_indices = torch.where(is_origin)[0]
+            if len(penalty_indices) > 0:
+                target_device = logits.device
+                valid_req_tensor = torch.tensor(valid_requests, device=target_device)
+                # 提取出需要惩罚的原始请求索引
+                # rows_to_punish =valid_req_tensor[penalty_indices].to(target_device)
+                # 提取出对应的重复 token
+                tokens_to_block = candidate_tokens[penalty_indices].to(target_device)
+                # 一次性将对应的 logits 设为负无穷
+                logits[valid_req_tensor[penalty_indices].to(target_device), tokens_to_block] = float('-inf')
 
         except Exception as e:
             # 发生错误时安全回退

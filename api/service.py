@@ -280,7 +280,7 @@ class SoulXPodcastService:
             logger.info(f"Generating audio for {num_speakers} speaker(s)")
 
             # 解析对话文本
-            target_text_list = parse_dialogue_text(dialogue_text, num_speakers)
+            target_text_list = parse_dialogue_text(dialogue_text, 0)
             logger.info(f"Parsed dialogue into {len(target_text_list)} segments")
 
             # 提取说话人和文本
@@ -435,17 +435,19 @@ class SoulXPodcastService:
             genera = time.time()
             logger.info(f"genera totcl time: {genera-generation_time:.4f}s")
             # 拼接音频
+            batch_sigine = list(results_dict['generated_wavs'][0])
             target_audio = None
-            for i in range(len(results_dict['generated_wavs'])):
+            for i in range(len(batch_sigine)):
                 if target_audio is None:
-                    target_audio = results_dict['generated_wavs'][i]
+                    target_audio = batch_sigine[i]
                 else:
                     target_audio = torch.concat(
-                        [target_audio, results_dict['generated_wavs'][i]], axis=1
+                        [target_audio, batch_sigine[i]], axis=0
                     )
 
             # 转换为numpy数组
-            audio_array = target_audio.cpu().squeeze(0).numpy()
+            # audio_array = target_audio.cpu().squeeze(0).numpy()
+            audio_array = target_audio.cpu().numpy()
             sample_rate = 24000
             audio_array_time = time.time()
             logger.info(f"audio_array_time time: {audio_array_time-genera:.4f}s")

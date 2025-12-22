@@ -23,7 +23,7 @@ def main():
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=8001,
         help="API端口（默认: 8000）"
     )
     parser.add_argument(

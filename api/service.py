@@ -204,6 +204,128 @@ class SoulXPodcastService:
             # 不抛出异常,允许服务继续运行
             self.preloaded_data = {}
 
+    def _prepare_batch_requests(self, batch_requests: List[dict]):
+        """
+        预处理批量请求，解析文本并记录每个请求的片段信息
+
+        Args:
+            batch_requests: 批量请求列表
+
+        Returns:
+            tuple: (all_text_ids_list, all_spks_lists, request_segment_mapping)
+        """
+        logger.info(f"Preparing {len(batch_requests)} batch requests...")
+
+        # 准备批量对话文本
+        batch_dialogue_texts = []
+        for i, request in enumerate(batch_requests):
+            dialogue_text = request.get('dialogue_text', '').strip()
+            if not dialogue_text:
+                raise ValueError(f"批量请求{i}缺少dialogue_text")
+            batch_dialogue_texts.append(dialogue_text)
+
+        # 预处理所有文本，并记录每个请求的片段信息
+        all_text_ids_list = []
+        all_spks_lists = []
+        request_segment_mapping = []  # 记录每个请求包含的片段数量和起始索引
+        current_segment_idx = 0
+
+        for batch_idx, dialogue_text in enumerate(batch_dialogue_texts):
+            # 解析对话文本
+            target_text_list = parse_dialogue_text(dialogue_text, 0)
+            logger.info(f"Request {batch_idx}: Parsed dialogue into {len(target_text_list)} segments")
+
+            # 提取说话人和文本
+            spks, texts = [], []
+            for target_text in target_text_list:
+                pattern = r'(\[S[1-9]\])(.+)'
+                match = re.match(pattern, target_text)
+                if match:
+                    text, spk = match.group(2), int(match.group(1)[2]) - 1
+                    spks.append(spk)
+                    texts.append(text)
+                else:
+                    raise ValueError(f"无效的对话文本格式: {target_text}")
+
+            text_ids_list, spks_list = [], []
+            for text, spk in zip(texts, spks):
+                text = normalize_text(text)
+                text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
+                text_ids = self.model.llm.tokenizer.encode(text)
+                text_ids_list.append(text_ids)
+                spks_list.append(spk)
+
+            # 记录当前请求的片段信息
+            segment_count = len(text_ids_list)
+            request_segment_mapping.append({
+                'request_idx': batch_idx,
+                'start_segment_idx': current_segment_idx,
+                'segment_count': segment_count,
+                'end_segment_idx': current_segment_idx + segment_count,
+                'dialogue_text': dialogue_text
+            })
+            current_segment_idx += segment_count
+
+            all_text_ids_list.append(text_ids_list)
+            all_spks_lists.append(spks_list)
+
+        logger.info(f"Request segment mapping: {request_segment_mapping}")
+        return all_text_ids_list, all_spks_lists, request_segment_mapping
+
+    def _concatenate_batch_results(
+        self,
+        batch_audio_results: List[np.ndarray],
+        request_segment_mapping: List[dict]
+    ) -> List[Tuple[int, np.ndarray]]:
+        """
+        根据请求片段映射信息，将生成的音频结果按请求拼接
+
+        Args:
+            batch_audio_results: 所有音频片段的生成结果
+            request_segment_mapping: 请求片段映射信息
+
+        Returns:
+            List[Tuple[int, np.ndarray]]: 按请求分组并拼接后的音频结果
+        """
+        logger.info("Concatenating batch audio results...")
+
+        final_results = []
+        sample_rate = 24000
+
+        for mapping in request_segment_mapping:
+            request_idx = mapping['request_idx']
+            start_idx = mapping['start_segment_idx']
+            end_idx = mapping['end_segment_idx']
+            segment_count = mapping['segment_count']
+
+            logger.info(f"Processing request {request_idx}: segments {start_idx}-{end_idx-1} (total: {segment_count})")
+
+            if segment_count == 1:
+                # 单个片段，直接使用
+                audio_array = batch_audio_results[start_idx]
+                logger.info(f"Request {request_idx}: single segment, audio length: {len(audio_array) / sample_rate:.2f}s")
+            else:
+                # 多个片段，需要拼接
+                segments_to_concat = batch_audio_results[start_idx:end_idx]
+
+                # 使用与generate函数相同的拼接逻辑
+                import torch
+                target_audio = None
+                for segment_audio in segments_to_concat:
+                    segment_tensor = torch.from_numpy(segment_audio)
+                    if target_audio is None:
+                        target_audio = segment_tensor
+                    else:
+                        target_audio = torch.concat([target_audio, segment_tensor], axis=0)
+
+                audio_array = target_audio.numpy()
+                logger.info(f"Request {request_idx}: concatenated {segment_count} segments, total audio length: {len(audio_array) / sample_rate:.2f}s")
+
+            final_results.append((sample_rate, audio_array))
+
+        logger.info(f"Batch concatenation completed: {len(final_results)} concatenated audios")
+        return final_results
+
 
     def generate_batch(
         self,
@@ -253,51 +375,11 @@ class SoulXPodcastService:
             logger.info(f"Using preloaded data for mode: {mode} ({self.preloaded_data[mode]['description']})")
             preloaded = self.preloaded_data[mode]
             prompt_audio_paths = preloaded["prompt_audio_paths"]
-            prompt_texts = preloaded["prompt_texts"]
+            # prompt_texts = preloaded["prompt_texts"]
 
-            # 准备批量对话文本
-            batch_dialogue_texts = []
-            for i, request in enumerate(batch_requests):
-                dialogue_text = request.get('dialogue_text', '').strip()
-                if not dialogue_text:
-                    raise ValueError(f"批量请求{i}缺少dialogue_text")
-                batch_dialogue_texts.append(dialogue_text)
-
+            all_text_ids_list, all_spks_lists, request_segment_mapping = self._prepare_batch_requests(batch_requests)
             num_speakers = len(prompt_audio_paths)
-            logger.info(f"Processing batch of {len(batch_dialogue_texts)} requests for {num_speakers} speaker(s)")
-
-            # 预处理所有文本
-            all_text_ids_list = []
-            all_spks_lists = []
-
-            for batch_idx, dialogue_text in enumerate(batch_dialogue_texts):
-                # 解析对话文本
-                target_text_list = parse_dialogue_text(dialogue_text, 0)
-                logger.info(f"Batch {batch_idx}: Parsed dialogue into {len(target_text_list)} segments")
-
-                # 提取说话人和文本
-                spks, texts = [], []
-                for target_text in target_text_list:
-                    pattern = r'(\[S[1-9]\])(.+)'
-                    match = re.match(pattern, target_text)
-                    if match:
-                        text, spk = match.group(2), int(match.group(1)[2]) - 1
-                        spks.append(spk)
-                        texts.append(text)
-                    else:
-                        raise ValueError(f"无效的对话文本格式: {target_text}")
-
-
-                text_ids_list, spks_list = [], []
-                for text, spk in zip(texts, spks):
-                    text = normalize_text(text)
-                    text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
-                    text_ids = self.model.llm.tokenizer.encode(text)
-                    text_ids_list.append(text_ids)
-                    spks_list.append(spk)
-
-                all_text_ids_list.append(text_ids_list)
-                all_spks_lists.append(spks_list)
+            logger.info(f"Processing batch for {num_speakers} speaker(s)")           
 
             # 调用模型的批量前向传播
             batch_results = self._forward_batch(
@@ -317,8 +399,10 @@ class SoulXPodcastService:
             )
 
             # 处理结果
-            sample_rate = 24000
-            results = [(sample_rate, audio_array) for audio_array in batch_results]
+            results = self._concatenate_batch_results(
+                batch_audio_results=batch_results,
+                request_segment_mapping=request_segment_mapping
+            )
 
             end_time = time.time()
             execution_time = end_time - start_time

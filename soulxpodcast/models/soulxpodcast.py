@@ -414,7 +414,7 @@ class SoulXPodcast(torch.nn.Module):
 
         # 使用原有的截取逻辑 - 修复批量处理中的索引问题
         # 每个请求对应的说话人的final_token_lens
-        padding_start_indices = [int((t - final_token_lens[spk_ids[i] if isinstance(spk_ids[i], int) else spk_ids[i][0]]) * 1.8 * 480) for i, t in enumerate(padding_start_indices)]
+        padding_start_indices = [int(((t - final_token_lens[spk_ids[i] if isinstance(spk_ids[i], int) else spk_ids[i][0]]) * 2 - 3)* 480) for i, t in enumerate(padding_start_indices)]
         wav_list = list(wav)
         final_wavs = []
         for i in range(len(wav_list)):
@@ -432,5 +432,5 @@ class SoulXPodcast(torch.nn.Module):
         total_batch_time = batch_end_time - batch_start_time
 
         logging.info(f"Batch parallel processing completed: {len(batch_results)} results in {total_batch_time:.3f}s")
-
+        
         return batch_results

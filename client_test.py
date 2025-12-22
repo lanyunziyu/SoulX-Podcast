@@ -431,7 +431,7 @@ def test_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
     for i in range(batch_size):
         # 根据模式生成对话文本
         if mode[0] == '0':  # 单人模式
-            dialogue_text = f'[S1]大家好，这是第{i+1}个测试请求。欢迎收听今天的节目。'
+            dialogue_text = f'[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
         else:  # 双人模式
             dialogue_text = f'[S1]大家好，这是第{i+1}个测试请求。[S2]是的，我们在测试批量生成功能。'
 
@@ -483,6 +483,84 @@ def test_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
             except:
                 print(f"  错误详情: {e.response.text}")
 
+def get_random_dialogue(request_id: int):
+    """
+    根据请求 ID 生成不同的对话内容
+    """
+    subjects = ["人工智能", "量子计算", "深度学习", "自动驾驶", "生物科技", "星际探索", "数字艺术", "气候变化"]
+    actions = ["最新进展", "未来挑战", "核心原理", "行业应用", "伦理问题", "技术突破"]
+    
+    sub = subjects[request_id % len(subjects)]
+    act = actions[request_id % len(actions)]
+    
+    # 模拟真实的多段标注格式 [S1]
+    templates = [
+        f"[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。",
+        f"[S1]欢迎收听科技频道。[S1]欢迎收听今天的节目，今天我们要聊一聊[S1]人工智能的最新进展。",
+        f"[S1]深度探讨时刻。[S1]今天的主题是{sub}，重点关注其{act}。"
+    ]
+    return templates[request_id % len(templates)]
+
+def test_batch_generation_total(api_url: str, total_requests: int = 100, batch_size: int = 10, mode: str = "010"):
+    """
+    测试批量生成功能：总计发送 100 个各不相同的请求，按 batch_size 分批发送。
+    """
+    print("\n" + "=" * 60)
+    print(f"启动分批差异化测试")
+    print(f"总请求数: {total_requests}, 每批大小: {batch_size}, 模式: {mode}")
+    print("=" * 60)
+
+    num_batches = (total_requests + batch_size - 1) // batch_size
+    all_start_time = time.time()
+    success_count = 0
+
+    for i in range(num_batches):
+        current_batch_count = min(batch_size, total_requests - i * batch_size)
+        print(f"\n正在处理第 {i+1}/{num_batches} 批次...")
+
+        # 1. 动态准备该批次的差异化数据
+        batch_requests = []
+        for j in range(current_batch_count):
+            # 计算全局唯一的请求 ID (1-100)
+            global_id = i * batch_size + j + 1
+            
+            # 生成不同的文本内容
+            diff_text = get_random_dialogue(global_id)
+            
+            batch_requests.append({
+                "dialogue_text": diff_text,
+                "request_id": f"req_{global_id}" # 如果后端支持 id 追踪可以加上
+            })
+
+
+        data = {
+            'batch_requests': json.dumps(batch_requests),
+            'mode': mode,
+            'return_format': 'files', 
+            'seed': 1988 + i # 每批使用不同的随机种子，进一步增加生成差异
+        }
+
+        # 2. 发送请求
+        batch_start = time.time()
+        try:
+            # 增加 timeout，因为 10 条文本的合成可能需要较长时间
+            response = requests.post(f"{api_url}/generate-batch", data=data, timeout=600)
+            response.raise_for_status()
+            
+            batch_elapsed = time.time() - batch_start
+            print(f"   成功 | 耗时: {batch_elapsed:.2f}s | 平均: {batch_elapsed/current_batch_count:.2f}s/条")
+            success_count += current_batch_count
+            
+        except Exception as e:
+            print(f"   失败 | 批次 {i+1}: {str(e)}")
+
+    total_elapsed = time.time() - all_start_time
+    print("\n" + "=" * 60)
+    print(f" 测试总结")
+    print(f"完成/总量: {success_count}/{total_requests}")
+    print(f"总耗时: {total_elapsed:.2f}秒")
+    print(f"系统吞吐率: {success_count/total_elapsed:.2f} 条/秒")
+    print("=" * 60)
 
 def test_health(api_url: str):
     """测试健康检查"""
@@ -511,7 +589,7 @@ def main():
     parser.add_argument(
         "--url",
         type=str,
-        default="http://localhost:8000",
+        default="http://localhost:8001",
         help="API服务地址（默认: http://localhost:8000）"
     )
     parser.add_argument(
@@ -524,14 +602,14 @@ def main():
     parser.add_argument(
         "--preset-mode",
         type=str,
-        default="010",
+        default="120",
         choices=["000", "001", "010", "011", "120", "121"],
         help="预设模式参数: 000=单人男生普通话, 001=单人男生英语, 010=单人女生普通话, 011=单人女生英语, 120=双人普通话, 121=双人英语（默认: 010）"
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=10,
+        default=1,
         help="批量测试请求数量（默认: 10）"
     )
     parser.add_argument(
@@ -564,6 +642,7 @@ def main():
     if args.mode == "batch":
         # 测试批量生成功能
         test_batch_generation(args.url, args.batch_size, args.preset_mode)
+        # test_batch_generation_total(args.url, 10 ,args.batch_size, args.preset_mode)
 
     if args.mode == "all":
         # 测试所有预设模式

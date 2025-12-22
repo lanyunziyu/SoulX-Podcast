@@ -298,8 +298,8 @@ async def generate_batch(
         if not batch_request_list:
             raise HTTPException(status_code=400, detail="批量请求列表不能为空")
 
-        if len(batch_request_list) > 100:  # 限制批量大小
-            raise HTTPException(status_code=400, detail="批量请求数量不能超过100个")
+        # if len(batch_request_list) > 100:  # 限制批量大小
+        #     raise HTTPException(status_code=400, detail="批量请求数量不能超过100个")
 
         # 验证每个请求的格式
         for i, request in enumerate(batch_request_list):

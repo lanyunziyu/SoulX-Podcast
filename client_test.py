@@ -408,6 +408,82 @@ def test_async(api_url: str):
             file_obj.close()
 
 
+def test_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
+    """测试批量生成功能"""
+    print("\n" + "=" * 60)
+    print(f"测试: 批量生成 - {batch_size}个请求，模式: {mode}")
+    print("=" * 60)
+
+    # 模式说明
+    mode_descriptions = {
+        "000": "单人男生普通话",
+        "001": "单人男生英语",
+        "010": "单人女生普通话",
+        "011": "单人女生英语",
+        "120": "双人普通话",
+        "121": "双人英语",
+    }
+
+    print(f"模式: {mode} - {mode_descriptions.get(mode, '未知模式')}")
+
+    # 准备批量请求数据
+    batch_requests = []
+    for i in range(batch_size):
+        # 根据模式生成对话文本
+        if mode[0] == '0':  # 单人模式
+            dialogue_text = f'[S1]大家好，这是第{i+1}个测试请求。欢迎收听今天的节目。'
+        else:  # 双人模式
+            dialogue_text = f'[S1]大家好，这是第{i+1}个测试请求。[S2]是的，我们在测试批量生成功能。'
+
+        batch_requests.append({
+            "dialogue_text": dialogue_text
+        })
+
+    # 准备请求数据
+    data = {
+        'batch_requests': json.dumps(batch_requests),
+        'mode': mode,
+        'return_format': 'files',  # 返回json格式节省时间
+        'seed': 1988
+    }
+
+    print(f"发送请求到: {api_url}/generate-batch")
+    print(f"批量大小: {batch_size}")
+    print(f"示例文本: {batch_requests[0]['dialogue_text']}")
+    start_time = time.time()
+
+    try:
+        # 发送批量请求
+        response = requests.post(f"{api_url}/generate-batch", data=data)
+        response.raise_for_status()
+
+        elapsed = time.time() - start_time
+        result = response.json()
+
+        print(f"✓ 批量生成成功!")
+        print(f"  耗时: {elapsed:.2f}秒")
+        print(f"  平均每个请求: {elapsed/batch_size:.2f}秒")
+        print(f"  消息: {result.get('message', 'N/A')}")
+        print(f"  批量大小: {result.get('batch_size', 'N/A')}")
+        print(f"  模式: {result.get('mode', 'N/A')}")
+
+        # 显示音频信息
+        audio_lengths = result.get('audio_lengths', [])
+        if audio_lengths:
+            sample_rate = result.get('sample_rate', 24000)
+            avg_length = sum(audio_lengths) / len(audio_lengths)
+            print(f"  平均音频长度: {avg_length/sample_rate:.2f}秒 ({avg_length} samples)")
+
+    except requests.exceptions.RequestException as e:
+        print(f"✗ 批量请求失败: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                print(f"  错误详情: {error_detail}")
+            except:
+                print(f"  错误详情: {e.response.text}")
+
+
 def test_health(api_url: str):
     """测试健康检查"""
     print("\n" + "=" * 60)
@@ -441,9 +517,9 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["health", "sync", "async", "all", "preset"],
-        default="preset",
-        help="测试模式（默认: sync）。preset: 测试预设模式"
+        choices=["health", "sync", "async", "all", "preset", "batch"],
+        default="batch",
+        help="测试模式（默认: preset）。preset: 测试预设模式, batch: 测试批量生成"
     )
     parser.add_argument(
         "--preset-mode",
@@ -484,6 +560,10 @@ def main():
     if args.mode == "preset":
         # 测试指定的预设模式
         test_sync_with_mode(args.url, args.preset_mode)
+
+    if args.mode == "batch":
+        # 测试批量生成功能
+        test_batch_generation(args.url, args.batch_size, args.preset_mode)
 
     if args.mode == "all":
         # 测试所有预设模式

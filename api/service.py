@@ -17,6 +17,8 @@ import s3tokenizer
 from soulxpodcast.models.soulxpodcast import SoulXPodcast
 from soulxpodcast.config import Config, SoulXPodcastLLMConfig, SamplingParams
 from soulxpodcast.utils.dataloader import PodcastInferHandler
+from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
+from soulxpodcast.utils.text import normalize_text
 
 from api.config import config as api_config
 from api.utils import parse_dialogue_text
@@ -202,6 +204,188 @@ class SoulXPodcastService:
             # 不抛出异常,允许服务继续运行
             self.preloaded_data = {}
 
+
+    def generate_batch(
+        self,
+        batch_requests: List[dict],
+        mode: Optional[str] = None,
+        temperature: float = 0.6,
+        top_k: int = 100,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.25,
+    ) -> List[Tuple[int, np.ndarray]]:
+        """
+        批量生成语音
+
+        Args:
+            batch_requests: 批量请求列表，每个请求包含一个S1对话文本
+            mode: 模式参数(三位数字)，使用预加载数据
+            temperature: 采样温度
+            top_k: Top-K采样
+            top_p: Top-P采样
+            repetition_penalty: 重复惩罚
+
+        Returns:
+            List[Tuple[int, np.ndarray]]: 批量音频结果列表
+        """
+        logger.info(f"Batch generate called - Instance ID: {id(self)}, Model loaded: {self.is_loaded()}")
+        logger.info(f"Processing {len(batch_requests)} batch requests with mode: {mode}")
+
+        if not self.is_loaded():
+            raise RuntimeError("模型未加载")
+
+        if not mode or mode not in self.preloaded_data:
+            raise ValueError(f"批量生成模式需要提供有效的mode参数，可选: {list(self.preloaded_data.keys())}")
+
+        start_time = time.time()
+        results = []
+
+        try:
+            # 设置随机种子
+            # seed = 0
+            # torch.manual_seed(seed)
+            # np.random.seed(seed)
+            # torch.cuda.manual_seed(seed)
+            # torch.backends.cudnn.deterministic = True
+            # torch.backends.cudnn.benchmark = False
+
+            # 使用预加载数据
+            logger.info(f"Using preloaded data for mode: {mode} ({self.preloaded_data[mode]['description']})")
+            preloaded = self.preloaded_data[mode]
+            prompt_audio_paths = preloaded["prompt_audio_paths"]
+            prompt_texts = preloaded["prompt_texts"]
+
+            # 准备批量对话文本
+            batch_dialogue_texts = []
+            for i, request in enumerate(batch_requests):
+                dialogue_text = request.get('dialogue_text', '').strip()
+                if not dialogue_text:
+                    raise ValueError(f"批量请求{i}缺少dialogue_text")
+                batch_dialogue_texts.append(dialogue_text)
+
+            num_speakers = len(prompt_audio_paths)
+            logger.info(f"Processing batch of {len(batch_dialogue_texts)} requests for {num_speakers} speaker(s)")
+
+            # 预处理所有文本
+            all_text_ids_list = []
+            all_spks_lists = []
+
+            for batch_idx, dialogue_text in enumerate(batch_dialogue_texts):
+                # 解析对话文本
+                target_text_list = parse_dialogue_text(dialogue_text, 0)
+                logger.info(f"Batch {batch_idx}: Parsed dialogue into {len(target_text_list)} segments")
+
+                # 提取说话人和文本
+                spks, texts = [], []
+                for target_text in target_text_list:
+                    pattern = r'(\[S[1-9]\])(.+)'
+                    match = re.match(pattern, target_text)
+                    if match:
+                        text, spk = match.group(2), int(match.group(1)[2]) - 1
+                        spks.append(spk)
+                        texts.append(text)
+                    else:
+                        raise ValueError(f"无效的对话文本格式: {target_text}")
+
+
+                text_ids_list, spks_list = [], []
+                for text, spk in zip(texts, spks):
+                    text = normalize_text(text)
+                    text = f"{SPK_DICT[spk]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
+                    text_ids = self.model.llm.tokenizer.encode(text)
+                    text_ids_list.append(text_ids)
+                    spks_list.append(spk)
+
+                all_text_ids_list.append(text_ids_list)
+                all_spks_lists.append(spks_list)
+
+            # 调用模型的批量前向传播
+            batch_results = self._forward_batch(
+                preloaded_features={
+                    "log_mel": preloaded["log_mel_list"],
+                    "spk_emb": preloaded["spk_emb_list"],
+                    "mel": preloaded["mel_list"],
+                    "mel_len": preloaded["mel_len_list"],
+                    "prompt_text_tokens": preloaded["prompt_text_ids_list"],
+                },
+                batch_text_ids_list=all_text_ids_list,
+                batch_spks_lists=all_spks_lists,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+            )
+
+            # 处理结果
+            sample_rate = 24000
+            results = [(sample_rate, audio_array) for audio_array in batch_results]
+
+            end_time = time.time()
+            execution_time = end_time - start_time
+            logger.info(f"Batch generation completed. {len(results)} results in {execution_time:.3f} seconds")
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Batch generation failed: {e}", exc_info=True)
+            raise RuntimeError(f"批量语音生成失败: {str(e)}")
+
+    def _forward_batch(
+        self,
+        preloaded_features: dict,
+        batch_text_ids_list: List[List[List[int]]],
+        batch_spks_lists: List[List[int]],
+        temperature: float,
+        top_k: int,
+        top_p: int,
+        repetition_penalty: float,
+    ) -> List[np.ndarray]:
+        """批量前向传播辅助方法"""
+
+        # 合并所有请求的文本tokens和说话人IDs为单个列表 - 这是关键
+        all_text_tokens = []
+        all_spk_ids = []
+
+        for text_ids_list, spks_list in zip(batch_text_ids_list, batch_spks_lists):
+            all_text_tokens.extend(text_ids_list)  # 展开每个请求的文本片段
+            all_spk_ids.extend(spks_list)         # 展开每个请求的说话人ID
+
+        # 采样参数
+        # from soulxpodcast.config import SamplingParams
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            top_k=top_k,
+            top_p=top_p,
+            extra_args={
+                "use_ras": True,
+                "win_size": 25,
+                "tau_r": 0.2,
+            },
+        )
+        # 准备模型输入 - 按照原有generate方法的方式处理数据
+        # import s3tokenizer
+        # import torch
+
+        prompt_mels_for_llm, prompt_mels_lens_for_llm = s3tokenizer.padding(preloaded_features["log_mel"])
+
+        spk_emb_for_flow = torch.tensor(preloaded_features["spk_emb"])
+        prompt_mels_for_flow = torch.nn.utils.rnn.pad_sequence(
+            preloaded_features["mel"], batch_first=True, padding_value=0
+        )
+        # prompt_mels_lens_for_flow = torch.tensor(preloaded_features["mel_len"])
+        # 调用模型批量前向传播 - 使用与forward_longform相同的接口
+        return self.model.forward_batch(
+            prompt_mels_for_llm=prompt_mels_for_llm,
+            prompt_mels_lens_for_llm=prompt_mels_lens_for_llm,
+            prompt_text_tokens_for_llm=preloaded_features["prompt_text_tokens"],
+            text_tokens_for_llm=all_text_tokens,  # 批量文本tokens列表
+            prompt_mels_for_flow_ori=prompt_mels_for_flow,
+            spk_emb_for_flow=spk_emb_for_flow,
+            sampling_params=sampling_params,
+            spk_ids=all_spk_ids,  # 批量说话人ID列表
+            use_dialect_prompt=False
+        )
 
     def generate(
         self,

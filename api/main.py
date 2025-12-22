@@ -267,6 +267,116 @@ async def generate_sync(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/generate-batch", tags=["Generation"])
+async def generate_batch(
+    batch_requests: str = Form(..., description="批量请求JSON数组，每个请求包含dialogue_text字段"),
+    mode: str = Form(..., description="模式参数(三位数字): 000=单人男生普通话, 010=单人女生普通话, 001=单人男生英语, 011=单人女生英语, 120=双人普通话, 121=双人英语"),
+    temperature: float = Form(default=0.6, ge=0.1, le=2.0, description="采样温度"),
+    top_k: int = Form(default=100, ge=1, le=500, description="Top-K采样"),
+    top_p: float = Form(default=0.9, ge=0.0, le=1.0, description="Top-P采样"),
+    repetition_penalty: float = Form(default=1.25, ge=1.0, le=2.0, description="重复惩罚"),
+    return_format: str = Form(default="files", description="返回格式: 'files'=返回音频文件列表, 'json'=返回成功消息"),
+):
+    """
+    批量生成语音（同步）
+
+    适用于多个短音频的批量生成，每个请求包含一个S1对话文本
+    """
+    try:
+        # 验证mode格式
+        if not (len(mode) == 3 and mode.isdigit()):
+            raise HTTPException(status_code=400, detail=f"无效的mode格式: {mode}，应为三位数字")
+
+        # 解析批量请求
+        try:
+            batch_request_list = json.loads(batch_requests)
+            if not isinstance(batch_request_list, list):
+                raise ValueError("batch_requests必须是JSON数组")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"batch_requests JSON格式错误: {str(e)}")
+
+        if not batch_request_list:
+            raise HTTPException(status_code=400, detail="批量请求列表不能为空")
+
+        if len(batch_request_list) > 100:  # 限制批量大小
+            raise HTTPException(status_code=400, detail="批量请求数量不能超过100个")
+
+        # 验证每个请求的格式
+        for i, request in enumerate(batch_request_list):
+            if not isinstance(request, dict):
+                raise HTTPException(status_code=400, detail=f"批量请求{i}必须是JSON对象")
+
+            dialogue_text = request.get('dialogue_text', '').strip()
+            if not dialogue_text:
+                raise HTTPException(status_code=400, detail=f"批量请求{i}缺少dialogue_text字段")
+
+            # 根据mode推断说话人数量进行验证
+            num_speakers = 2 if mode[0] == '1' else 1
+            is_valid, error_msg = validate_dialogue_format(dialogue_text, num_speakers)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=f"批量请求{i}对话格式错误: {error_msg}")
+
+        logger.info(f"Batch generation started: {len(batch_request_list)} requests with mode={mode}")
+
+        # 调用服务生成
+        service = get_service()
+        batch_results = service.generate_batch(
+            batch_requests=batch_request_list,
+            mode=mode,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+
+        if return_format == "json":
+            # 返回简单的成功消息
+            return JSONResponse(
+                content={
+                    "message": f"成功生成{len(batch_results)}个音频",
+                    "batch_size": len(batch_results),
+                    "mode": mode,
+                    "sample_rate": 24000 if batch_results else None,
+                    "audio_lengths": [len(audio_array) for _, audio_array in batch_results]
+                },
+                status_code=200
+            )
+        else:
+            # 保存结果文件并返回文件列表
+            batch_task_id = generate_task_id()
+            output_files = []
+
+            for i, (sample_rate, audio_array) in enumerate(batch_results):
+                output_filename = f"{batch_task_id}_batch_{i:03d}.wav"
+                output_path = config.output_dir / output_filename
+                wavfile.write(str(output_path), sample_rate, audio_array)
+                output_files.append({
+                    "index": i,
+                    "filename": output_filename,
+                    "download_url": f"/download/{output_filename}",
+                    "duration_seconds": len(audio_array) / sample_rate
+                })
+
+            logger.info(f"Batch generation completed: {len(batch_results)} files saved")
+
+            return JSONResponse(
+                content={
+                    "message": f"批量生成成功，共{len(batch_results)}个音频文件",
+                    "batch_id": batch_task_id,
+                    "batch_size": len(batch_results),
+                    "mode": mode,
+                    "files": output_files
+                },
+                status_code=200
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Batch generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/generate-async", response_model=TaskCreateResponse, tags=["Generation"])
 async def generate_async(
     prompt_audio: List[UploadFile] = File(..., description="参考音频文件（1-4个）"),

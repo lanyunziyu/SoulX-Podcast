@@ -1,5 +1,6 @@
 import time
 from datetime import datetime
+from typing import Dict, List, Optional
 
 from tqdm import tqdm
 from itertools import chain
@@ -255,6 +256,198 @@ class SoulXPodcast(torch.nn.Module):
         s_time = time.time()
         logging.info(f"s_time {s_time:.4f} seconds")
         return results_dict
+
+    def prepare_llm_inputs(
+        self,
+        segment: Dict,
+        mode: str,
+        inputs_prompt: list = None,
+        preloaded_data: Dict = None
+    ):
+        """
+        准备LLM输入（阶段1：数据预处理）
+
+        Args:
+            segment: 当前段落信息 {'text': '...', 'speaker': 0}
+            mode: 模式参数
+            inputs_prompt: 可选的已有inputs_prompt（多轮对话）
+            preloaded_data: 可选的预加载数据，如果None则从self获取
+
+        Returns:
+            llm_inputs: LLM输入token列表
+            context: flow/hifi所需上下文信息
+        """
+        import s3tokenizer
+        from itertools import chain
+
+        # 获取预加载数据
+        if preloaded_data is None:
+            from api.service import get_service
+            service = get_service()
+            preloaded_data = service.preloaded_data[mode]
+
+        # 准备文本tokens
+        from soulxpodcast.utils.dataloader import SPK_DICT, TEXT_START, TEXT_END, AUDIO_START
+        from soulxpodcast.utils.text import normalize_text
+
+        spk_id = segment.get('speaker', segment.get('spk_id', 0))
+        text = normalize_text(segment['text'])
+        text = f"{SPK_DICT[spk_id]}{TEXT_START}{text}{TEXT_END}{AUDIO_START}"
+        text_tokens = self.llm.tokenizer.encode(text)
+        # text_tokens = [text_tokens]  # 包装成列表
+
+        # 准备prompt_mels数据
+        prompt_mels_for_llm, prompt_mels_lens_for_llm = s3tokenizer.padding(preloaded_data["log_mel_list"])
+        spk_emb_for_flow = torch.tensor(preloaded_data["spk_emb_list"])
+        prompt_mels_for_flow = torch.nn.utils.rnn.pad_sequence(
+            preloaded_data["mel_list"], batch_first=True, padding_value=0
+        )
+
+        # Audio tokenization（使用已有逻辑）
+        prompt_speech_tokens_ori, prompt_speech_tokens_lens_ori = self.audio_tokenizer.quantize(
+            prompt_mels_for_llm.cuda(), prompt_mels_lens_for_llm.cuda()
+        )
+
+        # 处理speech tokens和mels
+        prompt_mels_for_flow_ori_tensor = prompt_mels_for_flow.cuda()
+        ori_mel_lens = torch.tensor([m.shape[0] for m in preloaded_data["mel_list"]], device='cuda')
+        target_mel_lens = prompt_speech_tokens_lens_ori * 2
+        final_mel_lens = torch.min(target_mel_lens, ori_mel_lens)
+        final_token_lens = final_mel_lens // 2
+
+        # 截断tokens和mels
+        batch_indices = torch.arange(prompt_speech_tokens_ori.size(1), device='cuda')[None, :]
+        token_mask = batch_indices < final_token_lens[:, None]
+        prompt_speech_tokens_batch = prompt_speech_tokens_ori * token_mask
+
+        mel_indices = torch.arange(prompt_mels_for_flow_ori_tensor.size(1), device='cuda')[None, :]
+        mel_mask = mel_indices < final_mel_lens[:, None]
+        prompt_mels_for_flow_batch = prompt_mels_for_flow_ori_tensor * mel_mask.unsqueeze(-1)
+
+        prompt_speech_tokens = [t[:l] for t, l in zip(prompt_speech_tokens_batch, final_token_lens)]
+        prompt_mels_for_flow_list = [m[:l] for m, l in zip(prompt_mels_for_flow_batch, final_mel_lens)]
+
+        # 准备LLM inputs
+        prompt_inputs = []
+        for i in range(len(prompt_speech_tokens)):
+            speech_tokens_i = [token + self.config.hf_config.speech_token_offset
+                             for token in prompt_speech_tokens[i].tolist()]
+            speech_tokens_i += [self.config.hf_config.eos_token_id]
+            prompt_inputs.append(preloaded_data["prompt_text_ids_list"][i] + speech_tokens_i)
+
+        current_prompt_inputs = list(chain.from_iterable(prompt_inputs))
+
+        # 处理inputs_prompt（支持多轮对话上下文）
+        if inputs_prompt is None:
+            final_inputs_prompt = current_prompt_inputs
+        else:
+            final_inputs_prompt = list(inputs_prompt)
+            final_inputs_prompt.extend(current_prompt_inputs)
+
+        # 构建LLM输入
+        llm_inputs = final_inputs_prompt + text_tokens
+
+        # 准备context（flow/hifi所需）
+        context = {
+            'prompt_speech_tokens': prompt_speech_tokens,
+            'prompt_mels_for_flow': prompt_mels_for_flow_list,
+            'prompt_mels_lens_for_flow': final_mel_lens.unsqueeze(-1),
+            'spk_emb_for_flow': spk_emb_for_flow,
+            'spk_id': spk_id,
+            'final_token_lens': final_token_lens,
+            'speech_token_offset': self.config.hf_config.speech_token_offset,
+        }
+
+        return llm_inputs, context
+
+    async def process_llm_result_async(
+        self,
+        llm_output: Dict,
+        context: Dict
+    ):
+        """
+        处理LLM结果（阶段3：flow + hifi异步执行）
+
+        Args:
+            llm_output: LLM输出 {'token_ids': [...], 'text': '...'}
+            context: 从prepare_llm_inputs返回的上下文
+
+        Returns:
+            audio: numpy音频数组
+
+        注意：flow和hifi是GPU同步计算，我们使用线程池实现真正的异步
+        """
+        import asyncio
+        import concurrent.futures
+
+        # 定义在线程中执行的同步函数
+        def _process_sync():
+            with torch.inference_mode():
+                # 提取context信息
+                prompt_speech_tokens = context['prompt_speech_tokens']
+                prompt_mels_for_flow = context['prompt_mels_for_flow']
+                prompt_mels_lens_for_flow = context['prompt_mels_lens_for_flow']
+                spk_emb_for_flow = context['spk_emb_for_flow']
+                spk_id = context['spk_id']
+                final_token_lens = context['final_token_lens']
+                speech_token_offset = context['speech_token_offset']
+
+                # 准备flow输入
+                generated_speech_tokens = [token - speech_token_offset for token in llm_output['token_ids'][:-1]]
+                prompt_speech_token = prompt_speech_tokens[spk_id].tolist()
+                p_t = torch.tensor(prompt_speech_token)
+                g_t = torch.tensor(generated_speech_tokens)
+                combined_sample = torch.cat([p_t, g_t], dim=0)
+                padding_start_idx = combined_sample.size(0)
+
+                flow_input = combined_sample.unsqueeze(0)  # [1, seq_len]
+                flow_inputs_len = torch.tensor([[flow_input.shape[1]]])
+
+                # Flow生成
+                prompt_mels = prompt_mels_for_flow[spk_id][None]
+                prompt_mels_lens = prompt_mels_lens_for_flow[spk_id][None]
+                spk_emb = spk_emb_for_flow[spk_id:spk_id+1]
+
+                with torch.amp.autocast("cuda", dtype=torch.float16 if self.config.hf_config.fp16_flow else torch.float32):
+                    generated_mels, generated_mels_lens = self.flow(
+                        flow_input.cuda(), flow_inputs_len.cuda(),
+                        prompt_mels, prompt_mels_lens, spk_emb.cuda(),
+                        streaming=False, finalize=True
+                    )
+
+                # HiFi-GAN生成
+                mel = generated_mels[:, :, prompt_mels_lens[0].item():generated_mels_lens[0].item()]
+                wav, _ = self.hift(speech_feat=mel)
+
+                # 截断音频
+                token_end_idx = int(((padding_start_idx - final_token_lens[spk_id]) * 2 - 2)* 480)
+                trimmed_wav = wav[0][:token_end_idx]
+
+                return trimmed_wav.cpu().numpy()
+
+        # 在线程池中执行同步GPU计算（真正的异步）
+        loop = asyncio.get_event_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        result = await loop.run_in_executor(executor, _process_sync)
+        return result
+
+    def update_inputs_prompt(self, inputs_prompt: list, generated_tokens: list):
+        """
+        更新多轮对话的inputs_prompt
+
+        Args:
+            inputs_prompt: 当前的inputs_prompt
+            generated_tokens: 新生成的tokens
+
+        Returns:
+            updated_inputs_prompt: 更新后的inputs_prompt
+        """
+        if inputs_prompt is None:
+            return generated_tokens[:]
+
+        updated = list(inputs_prompt)
+        updated.extend(generated_tokens)
+        return updated
 
     @torch.inference_mode()
     def forward_batch(

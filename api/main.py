@@ -460,11 +460,15 @@ async def generate_batch_async(
         service = get_service()
         responses = []
 
-        for req_data in batch_request_list:
+        logger.info("Creating BatchRequest objects...")
+        for i, req_data in enumerate(batch_request_list):
             request_id = generate_task_id()
+            logger.info(f"Processing request {i+1}/{len(batch_request_list)}: {request_id}")
 
             # 解析对话模式
+            logger.info(f"Analyzing dialogue mode for request {i+1}...")
             analysis = service._analyze_dialogue_mode(req_data['dialogue_text'])
+            logger.info(f"Analysis done: is_multi_speaker={analysis['is_multi_speaker']}, total_segments={analysis['total_segments']}")
 
             batch_req = BatchRequest(
                 request_id=request_id,
@@ -579,65 +583,130 @@ async def generate_async(
 
 
 @app.get("/task/{task_id}", response_model=TaskStatusResponse, tags=["Tasks"])
-async def get_task_status(task_id: str):
-    """查询任务状态（支持单次生成和批处理）"""
+async def get_task_status(task_id: str, timeout: int = 30):
+    """
+    查询任务状态（支持长轮询）
 
-    # 优先查询批处理管理器
+    Args:
+        task_id: 任务ID
+        timeout: 等待超时时间（秒），默认30秒。如果任务未完成，最多等待这么久
+
+    长轮询机制：
+    - 如果任务已完成/失败：立即返回结果
+    - 如果任务进行中：等待最多timeout秒，期间每0.5秒检查一次状态
+    - 如果超时仍未完成：返回当前状态（pending/processing）
+    """
+    import asyncio
+    import time
+
     batch_manager = get_batch_manager()
-    batch_result = await batch_manager.get_result(task_id)
-
-    if batch_result:
-        # 批处理请求
-        status_str = batch_result.get('status', RequestStatus.PENDING)
-        if isinstance(status_str, RequestStatus):
-            status_str = status_str.value
-
-        # 将RequestStatus映射到TaskStatus
-        status_mapping = {
-            'pending': TaskStatus.PENDING,
-            'processing': TaskStatus.RUNNING,
-            'completed': TaskStatus.COMPLETED,
-            'failed': TaskStatus.FAILED,
-        }
-        task_status = status_mapping.get(status_str, TaskStatus.PENDING)
-
-        result_url = None
-        if batch_result['status'] == RequestStatus.COMPLETED and 'output_path' in batch_result:
-            result_url = f"/download/{batch_result['output_path'].name}"
-
-        return TaskStatusResponse(
-            task_id=task_id,
-            status=task_status,
-            progress=100 if task_status == TaskStatus.COMPLETED else (50 if task_status == TaskStatus.RUNNING else 0),
-            result_url=result_url,
-            error=batch_result.get('error'),
-            created_at=datetime.fromtimestamp(batch_result.get('created_at', 0)) if 'created_at' in batch_result else None,
-            started_at=None,
-            completed_at=datetime.fromtimestamp(batch_result['completed_at']) if 'completed_at' in batch_result else None,
-        )
-
-    # 回退到单次任务管理器
     task_manager = get_task_manager()
-    task = task_manager.get_task(task_id)
 
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    # 验证timeout范围
+    timeout = max(1, min(timeout, 120))  # 限制在1-120秒
+    start_time = time.time()
+    check_interval = 0.5  # 每0.5秒检查一次
 
-    # 构建结果URL
-    result_url = None
-    if task.status == TaskStatus.COMPLETED and task.result_path:
-        result_url = f"/download/{task.result_path.name}"
+    logger.info(f"Query task {task_id} with long polling (timeout={timeout}s)")
 
-    return TaskStatusResponse(
-        task_id=task.task_id,
-        status=task.status,
-        progress=task.progress,
-        result_url=result_url,
-        error=task.error,
-        created_at=task.created_at,
-        started_at=task.started_at,
-        completed_at=task.completed_at,
-    )
+    while True:
+        # 优先查询批处理管理器
+        batch_result = await batch_manager.get_result(task_id)
+
+        if batch_result:
+            # 批处理请求
+            status_str = batch_result.get('status', RequestStatus.PENDING)
+            if isinstance(status_str, RequestStatus):
+                status_str = status_str.value
+
+            # 将RequestStatus映射到TaskStatus
+            status_mapping = {
+                'pending': TaskStatus.PENDING,
+                'processing': TaskStatus.RUNNING,
+                'completed': TaskStatus.COMPLETED,
+                'failed': TaskStatus.FAILED,
+            }
+            task_status = status_mapping.get(status_str, TaskStatus.PENDING)
+
+            # 如果任务已完成或失败，立即返回
+            if task_status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                result_url = None
+                if batch_result['status'] == RequestStatus.COMPLETED and 'output_path' in batch_result:
+                    result_url = f"/download/{batch_result['output_path'].name}"
+
+                logger.info(f"Task {task_id} finished with status {task_status}")
+                return TaskStatusResponse(
+                    task_id=task_id,
+                    status=task_status,
+                    progress=100 if task_status == TaskStatus.COMPLETED else 0,
+                    result_url=result_url,
+                    error=batch_result.get('error'),
+                    created_at=datetime.fromtimestamp(batch_result.get('created_at', 0)) if 'created_at' in batch_result else None,
+                    started_at=None,
+                    completed_at=datetime.fromtimestamp(batch_result['completed_at']) if 'completed_at' in batch_result else None,
+                )
+
+            # 任务进行中，检查是否超时
+            elapsed = time.time() - start_time
+            if elapsed >= timeout:
+                logger.info(f"Task {task_id} still running, long poll timeout after {elapsed:.1f}s")
+                return TaskStatusResponse(
+                    task_id=task_id,
+                    status=task_status,
+                    progress=50 if task_status == TaskStatus.RUNNING else 0,
+                    result_url=None,
+                    error=None,
+                    created_at=datetime.fromtimestamp(batch_result.get('created_at', 0)) if 'created_at' in batch_result else None,
+                    started_at=None,
+                    completed_at=None,
+                )
+
+            # 等待一段时间再检查
+            await asyncio.sleep(check_interval)
+            continue
+
+        # 回退到单次任务管理器
+        task = task_manager.get_task(task_id)
+
+        if task is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+        # 如果任务已完成或失败，立即返回
+        if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+            result_url = None
+            if task.status == TaskStatus.COMPLETED and task.result_path:
+                result_url = f"/download/{task.result_path.name}"
+
+            logger.info(f"Task {task_id} finished with status {task.status}")
+            return TaskStatusResponse(
+                task_id=task.task_id,
+                status=task.status,
+                progress=task.progress,
+                result_url=result_url,
+                error=task.error,
+                created_at=task.created_at,
+                started_at=task.started_at,
+                completed_at=task.completed_at,
+            )
+
+        # 任务进行中，检查是否超时
+        elapsed = time.time() - start_time
+        if elapsed >= timeout:
+            logger.info(f"Task {task_id} still running, long poll timeout after {elapsed:.1f}s")
+            return TaskStatusResponse(
+                task_id=task.task_id,
+                status=task.status,
+                progress=task.progress,
+                result_url=None,
+                error=None,
+                created_at=task.created_at,
+                started_at=task.started_at,
+                completed_at=None,
+            )
+
+        # 等待一段时间再检查
+        await asyncio.sleep(check_interval)
+        continue
 
 
 @app.get("/download/{filename}", tags=["Download"])

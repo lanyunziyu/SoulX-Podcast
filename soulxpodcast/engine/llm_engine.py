@@ -20,6 +20,10 @@ except ImportError:
 import logging
 from soulxpodcast.config import Config, SamplingParams
 from soulxpodcast.models.modules.sampler import _ras_sample_hf_engine
+import asyncio
+import uuid
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 class HFLLMEngine:
 
@@ -79,21 +83,25 @@ class HFLLMEngine:
 class VLLMEngine:
 
     def __init__(self, model, **kwargs):
-        
+
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
-        
+
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = config.hf_config.eos_token_id # speech eos token;
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         os.environ["VLLM_USE_V1"] = "1"
         if SUPPORT_VLLM:
-            self.model = LLM(model=model, enforce_eager=False, dtype="bfloat16", quantization="fp8",max_model_len=8192, enable_prefix_caching=True,logits_processors=["vllm_ras_logits_processor:FixedRASLogitsProcessor"])#,quantization="fp8",logits_processors=["/workspace/bella-infra/user/libeibei031/SoulX/SoulX-Podcast-main/vllm_ras_logits_processor.py:FixedRASLogitsProcessor"]
+            engine_args = AsyncEngineArgs(model=model, enforce_eager=False, dtype="bfloat16", quantization="fp8",max_model_len=8192, enable_prefix_caching=True,logits_processors=["vllm_ras_logits_processor:FixedRASLogitsProcessor"])#,quantization="fp8",logits_processors=["/workspace/bella-infra/user/libeibei031/SoulX/SoulX-Podcast-main/vllm_ras_logits_processor.py:FixedRASLogitsProcessor"]
+            self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         else:#,logits_processors=["vllm_ras_logits_processor:FixedRASLogitsProcessor"]
             raise ImportError("Not Support VLLM now!!!")
         self.config = config
         self.pad_token_id = self.tokenizer.pad_token_id
+
+        # 异步请求跟踪
+        self.pending_requests = {}  # {request_id: {'prompt': [...], 'status': 'pending'}}
 
     def generate(
         self,
@@ -130,3 +138,75 @@ class VLLMEngine:
         logging.info(f"batch decode time {batch_decode_time-start_time:.4f} seconds")
         # print(output["text"])
         return output
+
+    def _to_vllm_params(self, sampling_param: SamplingParams) -> VllmSamplingParams:
+        """转换SamplingParams为vLLM格式"""
+        vllm_params = asdict(sampling_param)
+        # 过滤RAS参数（vLLM不支持）
+        vllm_params.pop('use_ras', None)
+        vllm_params.pop('win_size', None)
+        vllm_params.pop('tau_r', None)
+        return VllmSamplingParams(**vllm_params)
+
+    async def generate_async(self, prompt_tokens: list[int], sampling_param: SamplingParams):
+        """
+        真正的异步生成接口。
+        不再手动 add_request，而是直接 await 结果。
+        """
+        request_id = f"soulx_{uuid.uuid4().hex}"
+        vllm_params = self._to_vllm_params(sampling_param)
+        
+        # vLLM V1 要求的输入格式
+        inputs = {"prompt_token_ids": prompt_tokens}
+
+        # 获取异步生成器
+        results_generator = self.engine.generate(inputs, vllm_params, request_id)
+
+        final_output = None
+        async for request_output in results_generator:
+            final_output = request_output
+        
+        if final_output:
+            token_ids = final_output.outputs[0].token_ids
+            return {
+                "token_ids": token_ids,
+                "text": self.tokenizer.decode(token_ids, skip_special_tokens=True)
+            }
+        return None
+
+    def poll_results(self, request_ids=None):
+        """
+        非阻塞查询结果，返回已完成的请求
+
+        Args:
+            request_ids: 要查询的请求ID列表，None表示查询所有pending请求
+
+        Returns:
+            completed: {request_id: {'token_ids': [...], 'text': '...'}}
+        """
+        if request_ids is None:
+            request_ids = list(self.pending_requests.keys())
+
+        completed = {}
+        for req_id in request_ids:
+            if req_id not in self.pending_requests:
+                continue
+
+            # 使用vLLM V1 API获取请求输出
+            try:
+                outputs = self.model.llm_engine.get_request_outputs(req_id)
+                if outputs and outputs.finished:
+                    token_ids = outputs.outputs[0].token_ids
+                    completed[req_id] = {
+                        'token_ids': token_ids,
+                        'text': self.tokenizer.decode(token_ids, skip_special_tokens=False)
+                    }
+                    # 从pending中移除
+                    del self.pending_requests[req_id]
+                    logging.debug(f"Request {req_id} completed")
+            except Exception as e:
+                logging.error(f"Error polling request {req_id}: {e}")
+                # 出错的请求也从pending中移除
+                del self.pending_requests[req_id]
+
+        return completed

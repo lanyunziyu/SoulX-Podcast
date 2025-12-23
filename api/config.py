@@ -52,7 +52,11 @@ class APIConfig:
     batch_timeout: float = float(os.getenv("BATCH_TIMEOUT", "0.5"))
     max_batch_size: int = int(os.getenv("MAX_BATCH_SIZE", "16"))
     max_batch_queue_size: int = int(os.getenv("MAX_BATCH_QUEUE_SIZE", "500"))
-    num_batch_workers: int = int(os.getenv("NUM_BATCH_WORKERS", "1"))    
+    num_batch_workers: int = int(os.getenv("NUM_BATCH_WORKERS", "1"))
+
+    # 异步处理配置
+    max_audio_concurrent: int = int(os.getenv("MAX_AUDIO_CONCURRENT", "6"))  # flow+hifi最大并发数
+    vllm_poll_interval: float = float(os.getenv("VLLM_POLL_INTERVAL", "0.01"))  # vLLM轮询间隔（秒）
 
     # 默认生成参数
     default_seed: int = 1988

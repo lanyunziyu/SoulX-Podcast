@@ -562,6 +562,7 @@ def test_batch_generation_total(api_url: str, total_requests: int = 100, batch_s
     print(f"系统吞吐率: {success_count/total_elapsed:.2f} 条/秒")
     print("=" * 60)
 
+
 def test_async_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
     """测试异步批量生成功能"""
     print("\n" + "=" * 60)
@@ -603,16 +604,22 @@ def test_async_batch_generation(api_url: str, batch_size: int = 5, mode: str = "
         'batch_requests': json.dumps(batch_requests),
         'mode': mode,
         'batch_size': 2,  # 固定batch size为2，测试调度
-        'seed': 1988
     }
 
     print(f"\n发送异步批量请求到: {api_url}/generate-batch-async")
     print(f"批量大小: {len(batch_requests)}, 固定batch_size=2")
+    print(f"请求数据: batch_requests数量={len(batch_requests)}, mode={mode}, batch_size=2")
     start_time = time.time()
 
     try:
-        # 发送异步批量请求
-        response = requests.post(f"{api_url}/generate-batch-async", data=data)
+        # 发送异步批量请求（添加超时）
+        print("正在发送POST请求...")
+        response = requests.post(
+            f"{api_url}/generate-batch-async",
+            data=data,
+            timeout=10  # 10秒超时
+        )
+        print(f"收到响应: status_code={response.status_code}")
         response.raise_for_status()
 
         result = response.json()
@@ -621,32 +628,54 @@ def test_async_batch_generation(api_url: str, batch_size: int = 5, mode: str = "
         print(f"✓ 异步批量请求已提交!")
         print(f"  收到{len(task_ids)}个任务ID")
 
-        # 轮询所有任务状态
+        # 使用长轮询并发等待所有任务完成
         completed = {}
-        max_attempts = 120
-        attempt = 0
+        long_poll_timeout = 30  # 每次长轮询30秒
 
-        print("\n等待任务完成...")
-        while len(completed) < len(task_ids) and attempt < max_attempts:
-            time.sleep(2)
-            attempt += 1
+        print("\n等待任务完成（使用长轮询）...")
 
-            for task_id in task_ids:
-                if task_id in completed:
-                    continue
+        # 使用线程池并发轮询
+        import concurrent.futures
+        import threading
 
-                status_response = requests.get(f"{api_url}/task/{task_id}")
-                status_response.raise_for_status()
-                status = status_response.json()
+        results_lock = threading.Lock()
 
-                if status['status'] in ['completed', 'failed']:
-                    completed[task_id] = {
-                        'status': status['status'],
-                        'result_url': status.get('result_url'),
-                        'completed_at': time.time()
-                    }
-                    req_idx = task_ids.index(task_id) + 1
-                    print(f"  [{attempt}] 请求{req_idx} ({task_id[:8]}...): {status['status']}")
+        def poll_single_task(task_id, req_idx):
+            """长轮询单个任务"""
+            while True:
+                try:
+                    status_response = requests.get(f"{api_url}/task/{task_id}?timeout={long_poll_timeout}")
+                    status_response.raise_for_status()
+                    status = status_response.json()
+
+                    if status['status'] in ['completed', 'failed']:
+                        with results_lock:
+                            completed[task_id] = {
+                                'status': status['status'],
+                                'result_url': status.get('result_url'),
+                                'completed_at': time.time()
+                            }
+                        print(f"  请求{req_idx} ({task_id[:8]}...): {status['status']}")
+                        return
+                    # 如果仍在进行中，继续长轮询
+                except Exception as e:
+                    print(f"  请求{req_idx} ({task_id[:8]}...) 轮询错误: {e}")
+                    with results_lock:
+                        completed[task_id] = {
+                            'status': 'failed',
+                            'result_url': None,
+                            'completed_at': time.time(),
+                            'error': str(e)
+                        }
+                    return
+
+        # 并发轮询所有任务
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(task_ids)) as executor:
+            futures = [
+                executor.submit(poll_single_task, task_id, i+1)
+                for i, task_id in enumerate(task_ids)
+            ]
+            concurrent.futures.wait(futures, timeout=300)  # 最多等待5分钟
 
         elapsed = time.time() - start_time
 
@@ -737,7 +766,7 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1,
+        default=3,
         help="批量测试请求数量（默认: 10）"
     )
     parser.add_argument(
@@ -754,9 +783,6 @@ def main():
 
     # 确保输出目录存在
     Path("api/outputs").mkdir(parents=True, exist_ok=True)
-
-    if args.mode in ["health", "all"]:
-        test_health(args.url)
 
     if args.mode in ["sync", "all"]:
         test_sync_single_speaker(args.url)

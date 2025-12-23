@@ -27,6 +27,19 @@ class RequestStatus(str, Enum):
 
 
 @dataclass
+class SegmentState:
+    """单段状态追踪"""
+    segment_idx: int
+    vllm_request_id: Optional[str] = None  # vLLM请求ID
+    llm_completed: bool = False
+    llm_completed_at: Optional[float] = None
+    audio_task_id: Optional[str] = None  # flow+hifi任务ID
+    audio_completed: bool = False
+    audio_completed_at: Optional[float] = None
+    audio_result: Optional[np.ndarray] = None
+
+
+@dataclass
 class BatchRequest:
     """批处理请求数据模型"""
     request_id: str
@@ -47,13 +60,24 @@ class BatchRequest:
     # 状态管理
     status: RequestStatus = RequestStatus.PENDING
     current_segment: int = 0
-    accumulated_audios: List[np.ndarray] = field(default_factory=list)
-    inputs_prompt: Optional[List[int]] = None  # 多轮LLM上下文
+
+    # 新增：多段状态追踪
+    segment_states: List[SegmentState] = field(default_factory=list)
+    accumulated_audios: Dict[int, np.ndarray] = field(default_factory=dict)  # {seg_idx: audio}
+    inputs_prompt: Optional[List[int]] = None  # LLM上下文状态
 
     # 时间戳
     created_at: float = field(default_factory=time.time)
     completed_at: Optional[float] = None
     error: Optional[str] = None
+
+    def __post_init__(self):
+        """初始化segment状态"""
+        if not self.segment_states:
+            self.segment_states = [
+                SegmentState(segment_idx=i)
+                for i in range(self.total_segments)
+            ]
 
 
 class RequestResultStore:
@@ -167,11 +191,9 @@ class AsyncBatchManager:
     async def add_request(self, request: BatchRequest):
         """添加请求到队列"""
         try:
+            await self.result_store.store_pending(request.request_id, request.created_at)
             await self.pending_queue.put(request)
             self.total_requests += 1
-
-            # 立即在result_store中创建pending状态记录
-            await self.result_store.store_pending(request.request_id, request.created_at)
 
             logger.info(f"Added request {request.request_id} to queue (queue_size={self.pending_queue.qsize()})")
         except asyncio.QueueFull:
@@ -239,6 +261,10 @@ class AsyncBatchManager:
     async def get_result(self, request_id: str) -> Optional[Dict]:
         """查询请求结果"""
         return await self.result_store.get_result(request_id)
+    
+    async def get_next_request(self) -> BatchRequest:
+            """Worker 调用，阻塞直到拿到新任务"""
+            return await self.pending_queue.get()    
 
     def get_statistics(self) -> Dict:
         """获取统计信息"""

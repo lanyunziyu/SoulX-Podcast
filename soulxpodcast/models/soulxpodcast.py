@@ -269,16 +269,27 @@ class SoulXPodcast(torch.nn.Module):
         use_dialect_prompt: bool = False,
         dialect_prompt_text_tokens_for_llm: list[list[int]] = None,
         dialect_prefix: list[list[int]] = None,
+        inputs_prompt: list = None,  # 支持传入已有的prompt
+        return_state: bool = False,  # 是否返回状态信息
         **kwargs,  # for compatibility
-    ) -> list:
+    ):
         """
-        批量并行前向传播 - 与forward_longform完全相同的接口
+        批量并行前向传播，支持状态管理和多轮对话
 
         Args:
-            与forward_longform完全相同的参数，只是text_tokens_for_llm和spk_ids是批量数据
+            inputs_prompt: 可选的已有inputs_prompt，用于多轮对话的上下文
+            return_state: 如果为True，返回dict包含音频结果和状态；如果为False，只返回音频列表
+            其他参数与forward_longform相同
 
         Returns:
-            list: 批量音频结果列表 [np.ndarray, ...]
+            list 或 dict:
+                - 如果return_state=False: 批量音频结果列表 [np.ndarray, ...]
+                - 如果return_state=True: {
+                    'audio_results': list,      # 音频结果列表
+                    'inputs_prompt': list,      # 更新后的inputs_prompt
+                    'llm_outputs': dict,        # LLM输出
+                    'generation_info': dict     # 生成信息
+                  }
         """
         batch_start_time = time.time()
         turn_size = len(text_tokens_for_llm)
@@ -354,11 +365,20 @@ class SoulXPodcast(torch.nn.Module):
         preprocessing_time = time.time()
         logging.info(f"LLM input processing completed in {preprocessing_time-s3audio_tokenization_time:.4f} seconds")
 
-        # LLM generation - 批量处理
-        inputs_prompt = list(chain.from_iterable(prompt_inputs))
+        # LLM generation - 批量处理，支持状态管理
+        current_prompt_inputs = list(chain.from_iterable(prompt_inputs))
+
+        # 处理inputs_prompt（支持多轮对话上下文）
+        if inputs_prompt is None:
+            # 首次调用，使用当前prompt
+            final_inputs_prompt = current_prompt_inputs
+        else:
+            # 多轮调用，append到之前的inputs_prompt后面
+            final_inputs_prompt = list(inputs_prompt)  # 复制
+            final_inputs_prompt.extend(current_prompt_inputs)  # append形式
 
         # 构建批量输入 - VLLM引擎接受list输入
-        inputs = [inputs_prompt + t for t in text_tokens_for_llm]
+        inputs = [final_inputs_prompt + t for t in text_tokens_for_llm]
 
         llm_outputs = self.llm.generate(inputs, sampling_params)  # 批量LLM生成
 
@@ -414,7 +434,7 @@ class SoulXPodcast(torch.nn.Module):
 
         # 使用原有的截取逻辑 - 修复批量处理中的索引问题
         # 每个请求对应的说话人的final_token_lens
-        padding_start_indices = [int(((t - final_token_lens[spk_ids[i] if isinstance(spk_ids[i], int) else spk_ids[i][0]]) * 2 - 3)* 480) for i, t in enumerate(padding_start_indices)]
+        padding_start_indices = [int((t - final_token_lens[spk_ids[i] if isinstance(spk_ids[i], int) else spk_ids[i][0]]) * 1.8 * 480) for i, t in enumerate(padding_start_indices)]
         wav_list = list(wav)
         final_wavs = []
         for i in range(len(wav_list)):
@@ -432,5 +452,26 @@ class SoulXPodcast(torch.nn.Module):
         total_batch_time = batch_end_time - batch_start_time
 
         logging.info(f"Batch parallel processing completed: {len(batch_results)} results in {total_batch_time:.3f}s")
-        
-        return batch_results
+
+        # 根据return_state决定返回格式
+        if not return_state:
+            # 兼容原有接口，只返回音频结果列表
+            return batch_results
+        else:
+            # 返回包含状态的完整信息
+            # 更新inputs_prompt，添加生成的token用于下一轮
+            updated_inputs_prompt = final_inputs_prompt
+            for i, tokens in enumerate(llm_outputs['token_ids']):
+                updated_inputs_prompt.extend(text_tokens_for_llm[i][:-1])  # 去掉最后的audio_start token
+                updated_inputs_prompt.extend(tokens)  # 添加生成的tokens
+
+            return {
+                'audio_results': batch_results,
+                'inputs_prompt': updated_inputs_prompt,
+                'llm_outputs': llm_outputs,
+                'generation_info': {
+                    'total_time': total_batch_time,
+                    'segments_processed': turn_size,
+                    'final_prompt_length': len(updated_inputs_prompt)
+                }
+            }

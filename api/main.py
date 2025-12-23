@@ -4,7 +4,8 @@ FastAPI Main Application for SoulX-Podcast Voice Cloning API
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Optional
+from datetime import datetime
 import json
 import threading
 
@@ -24,6 +25,8 @@ from api.models import (
 )
 from api.service import get_service
 from api.tasks import get_task_manager
+from api.batch_manager import get_batch_manager, BatchRequest, RequestStatus
+from api.batch_worker import batch_worker_loop, cleanup_worker
 from api.utils import (
     generate_task_id,
     save_upload_file,
@@ -61,6 +64,17 @@ async def lifespan(app: FastAPI):
     task_manager = get_task_manager()
     task_manager.start_workers(config.max_concurrent_tasks)
 
+    # 启动批处理worker
+    batch_manager = get_batch_manager()
+    batch_workers = []
+    for i in range(config.num_batch_workers):
+        worker = asyncio.create_task(batch_worker_loop(batch_manager))
+        batch_workers.append(worker)
+    logger.info(f"Started {len(batch_workers)} batch worker(s)")
+
+    # 启动批处理结果清理worker
+    cleanup_worker_task = asyncio.create_task(cleanup_worker())
+
     # 启动文件清理任务
     async def cleanup_task():
         while True:
@@ -78,6 +92,13 @@ async def lifespan(app: FastAPI):
 
     # 关闭时
     logger.info("Shutting down API...")
+
+    # 关闭批处理workers
+    for worker in batch_workers:
+        worker.cancel()
+    cleanup_worker_task.cancel()
+    await asyncio.gather(*batch_workers, cleanup_worker_task, return_exceptions=True)
+
     cleanup_task_handle.cancel()
 
     # 快速关闭任务管理器
@@ -298,8 +319,8 @@ async def generate_batch(
         if not batch_request_list:
             raise HTTPException(status_code=400, detail="批量请求列表不能为空")
 
-        # if len(batch_request_list) > 100:  # 限制批量大小
-        #     raise HTTPException(status_code=400, detail="批量请求数量不能超过100个")
+        if len(batch_request_list) > 100:  # 限制批量大小
+            raise HTTPException(status_code=400, detail="批量请求数量不能超过100个")
 
         # 验证每个请求的格式
         for i, request in enumerate(batch_request_list):
@@ -374,6 +395,108 @@ async def generate_batch(
         raise
     except Exception as e:
         logger.error(f"Batch generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-batch-async", response_model=List[TaskCreateResponse], tags=["Generation"])
+async def generate_batch_async(
+    batch_requests: str = Form(..., description="批量请求JSON数组，每个请求包含dialogue_text字段"),
+    mode: str = Form(..., description="模式参数(三位数字): 000=单人男生普通话, 010=单人女生普通话, 001=单人男生英语, 011=单人女生英语, 120=双人普通话, 121=双人英语"),
+    batch_size: Optional[int] = Form(None, description="批次大小（可选，默认使用配置的default_batch_size）"),
+    temperature: float = Form(default=0.6, ge=0.1, le=2.0, description="采样温度"),
+    top_k: int = Form(default=100, ge=1, le=500, description="Top-K采样"),
+    top_p: float = Form(default=0.9, ge=0.0, le=1.0, description="Top-P采样"),
+    repetition_penalty: float = Form(default=1.25, ge=1.0, le=2.0, description="重复惩罚"),
+):
+    """
+    异步批量生成语音（返回任务ID列表）
+
+    适用于批量请求，每个请求独立返回，无需等待整个批次完成
+    客户端通过 /task/{request_id} 轮询各个请求的状态
+    """
+    try:
+        # 验证mode格式
+        if not (len(mode) == 3 and mode.isdigit()):
+            raise HTTPException(status_code=400, detail=f"无效的mode格式: {mode}，应为三位数字")
+
+        # 解析批量请求
+        try:
+            batch_request_list = json.loads(batch_requests)
+            if not isinstance(batch_request_list, list):
+                raise ValueError("batch_requests必须是JSON数组")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"batch_requests JSON格式错误: {str(e)}")
+
+        if not batch_request_list:
+            raise HTTPException(status_code=400, detail="批量请求列表不能为空")
+
+        if len(batch_request_list) > 100:
+            raise HTTPException(status_code=400, detail="批量请求数量不能超过100个")
+
+        # 验证batch_size
+        effective_batch_size = batch_size or config.default_batch_size
+        if effective_batch_size > config.max_batch_size:
+            raise HTTPException(status_code=400, detail=f"batch_size不能超过{config.max_batch_size}")
+
+        # 验证每个请求的格式
+        for i, req_data in enumerate(batch_request_list):
+            if not isinstance(req_data, dict):
+                raise HTTPException(status_code=400, detail=f"批量请求{i}必须是JSON对象")
+
+            dialogue_text = req_data.get('dialogue_text', '').strip()
+            if not dialogue_text:
+                raise HTTPException(status_code=400, detail=f"批量请求{i}缺少dialogue_text字段")
+
+            # 根据mode推断说话人数量进行验证
+            num_speakers = 2 if mode[0] == '1' else 1
+            is_valid, error_msg = validate_dialogue_format(dialogue_text, num_speakers)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=f"批量请求{i}对话格式错误: {error_msg}")
+
+        logger.info(f"Async batch generation started: {len(batch_request_list)} requests with mode={mode}, batch_size={effective_batch_size}")
+
+        # 为每个请求创建BatchRequest对象
+        batch_manager = get_batch_manager()
+        service = get_service()
+        responses = []
+
+        for req_data in batch_request_list:
+            request_id = generate_task_id()
+
+            # 解析对话模式
+            analysis = service._analyze_dialogue_mode(req_data['dialogue_text'])
+
+            batch_req = BatchRequest(
+                request_id=request_id,
+                dialogue_text=req_data['dialogue_text'],
+                mode=mode,
+                is_multi_speaker=analysis['is_multi_speaker'],
+                total_segments=analysis['total_segments'],
+                segments=analysis['segments'],
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                status=RequestStatus.PENDING,
+            )
+
+            # 加入队列
+            await batch_manager.add_request(batch_req)
+
+            responses.append(TaskCreateResponse(
+                task_id=request_id,
+                status=TaskStatus.PENDING,
+                created_at=datetime.now(),
+                message="请求已加入批处理队列"
+            ))
+
+        logger.info(f"Added {len(responses)} requests to async batch queue")
+        return responses
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Async batch generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -457,7 +580,43 @@ async def generate_async(
 
 @app.get("/task/{task_id}", response_model=TaskStatusResponse, tags=["Tasks"])
 async def get_task_status(task_id: str):
-    """查询任务状态"""
+    """查询任务状态（支持单次生成和批处理）"""
+
+    # 优先查询批处理管理器
+    batch_manager = get_batch_manager()
+    batch_result = await batch_manager.get_result(task_id)
+
+    if batch_result:
+        # 批处理请求
+        status_str = batch_result.get('status', RequestStatus.PENDING)
+        if isinstance(status_str, RequestStatus):
+            status_str = status_str.value
+
+        # 将RequestStatus映射到TaskStatus
+        status_mapping = {
+            'pending': TaskStatus.PENDING,
+            'processing': TaskStatus.RUNNING,
+            'completed': TaskStatus.COMPLETED,
+            'failed': TaskStatus.FAILED,
+        }
+        task_status = status_mapping.get(status_str, TaskStatus.PENDING)
+
+        result_url = None
+        if batch_result['status'] == RequestStatus.COMPLETED and 'output_path' in batch_result:
+            result_url = f"/download/{batch_result['output_path'].name}"
+
+        return TaskStatusResponse(
+            task_id=task_id,
+            status=task_status,
+            progress=100 if task_status == TaskStatus.COMPLETED else (50 if task_status == TaskStatus.RUNNING else 0),
+            result_url=result_url,
+            error=batch_result.get('error'),
+            created_at=datetime.fromtimestamp(batch_result.get('created_at', 0)) if 'created_at' in batch_result else None,
+            started_at=None,
+            completed_at=datetime.fromtimestamp(batch_result['completed_at']) if 'completed_at' in batch_result else None,
+        )
+
+    # 回退到单次任务管理器
     task_manager = get_task_manager()
     task = task_manager.get_task(task_id)
 

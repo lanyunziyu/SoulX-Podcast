@@ -433,7 +433,7 @@ def test_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
         if mode[0] == '0':  # 单人模式
             dialogue_text = f'[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
         else:  # 双人模式
-            dialogue_text = f'[S1]大家好，这是第{i+1}个测试请求。[S2]是的，我们在测试批量生成功能。'
+            dialogue_text = f'[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
 
         batch_requests.append({
             "dialogue_text": dialogue_text
@@ -562,6 +562,134 @@ def test_batch_generation_total(api_url: str, total_requests: int = 100, batch_s
     print(f"系统吞吐率: {success_count/total_elapsed:.2f} 条/秒")
     print("=" * 60)
 
+def test_async_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
+    """测试异步批量生成功能"""
+    print("\n" + "=" * 60)
+    print(f"测试: 异步批量生成 - {batch_size}个请求，模式: {mode}")
+    print("=" * 60)
+
+    # 模式说明
+    mode_descriptions = {
+        "000": "单人男生普通话",
+        "001": "单人男生英语",
+        "010": "单人女生普通话",
+        "011": "单人女生英语",
+        "120": "双人普通话",
+        "121": "双人英语",
+    }
+
+    print(f"模式: {mode} - {mode_descriptions.get(mode, '未知模式')}")
+
+    # 准备批量请求数据（包含多人和单人对话混合）
+    batch_requests = []
+
+    # 添加1个多人对话请求（3段）
+    if mode[0] == '1':  # 双人模式
+        batch_requests.append({
+            "dialogue_text": "[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。"
+        })
+        print(f"请求1: 多人对话 (3段)")
+
+    # 添加单人对话请求
+    for i in range(batch_size - (1 if mode[0] == '1' else 0)):
+        req_num = i + (2 if mode[0] == '1' else 1)
+        batch_requests.append({
+            "dialogue_text": f"[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。"
+        })
+        print(f"请求{req_num}: 单人对话 (1段)")
+
+    # 准备请求数据
+    data = {
+        'batch_requests': json.dumps(batch_requests),
+        'mode': mode,
+        'batch_size': 2,  # 固定batch size为2，测试调度
+        'seed': 1988
+    }
+
+    print(f"\n发送异步批量请求到: {api_url}/generate-batch-async")
+    print(f"批量大小: {len(batch_requests)}, 固定batch_size=2")
+    start_time = time.time()
+
+    try:
+        # 发送异步批量请求
+        response = requests.post(f"{api_url}/generate-batch-async", data=data)
+        response.raise_for_status()
+
+        result = response.json()
+        task_ids = [item['task_id'] for item in result]
+
+        print(f"✓ 异步批量请求已提交!")
+        print(f"  收到{len(task_ids)}个任务ID")
+
+        # 轮询所有任务状态
+        completed = {}
+        max_attempts = 120
+        attempt = 0
+
+        print("\n等待任务完成...")
+        while len(completed) < len(task_ids) and attempt < max_attempts:
+            time.sleep(2)
+            attempt += 1
+
+            for task_id in task_ids:
+                if task_id in completed:
+                    continue
+
+                status_response = requests.get(f"{api_url}/task/{task_id}")
+                status_response.raise_for_status()
+                status = status_response.json()
+
+                if status['status'] in ['completed', 'failed']:
+                    completed[task_id] = {
+                        'status': status['status'],
+                        'result_url': status.get('result_url'),
+                        'completed_at': time.time()
+                    }
+                    req_idx = task_ids.index(task_id) + 1
+                    print(f"  [{attempt}] 请求{req_idx} ({task_id[:8]}...): {status['status']}")
+
+        elapsed = time.time() - start_time
+
+        # 统计结果
+        completed_count = len([c for c in completed.values() if c['status'] == 'completed'])
+        failed_count = len([c for c in completed.values() if c['status'] == 'failed'])
+
+        print("\n" + "=" * 60)
+        print("📈 异步批量测试结果统计")
+        print("=" * 60)
+        print(f"总请求数: {len(task_ids)}")
+        print(f"完成请求: {completed_count}")
+        print(f"失败请求: {failed_count}")
+        print(f"未完成请求: {len(task_ids) - len(completed)}")
+        print(f"总耗时: {elapsed:.2f}秒")
+        print(f"平均每个请求: {elapsed/len(task_ids):.2f}秒")
+
+        # 下载完成的音频
+        if completed_count > 0:
+            print(f"\n✓ 开始下载{completed_count}个音频文件...")
+            for i, (task_id, info) in enumerate(completed.items()):
+                if info['status'] == 'completed' and info['result_url']:
+                    download_url = f"{api_url}{info['result_url']}"
+                    audio_response = requests.get(download_url)
+                    audio_response.raise_for_status()
+
+                    output_path = f"api/outputs/async_batch_test_{task_id[:8]}.wav"
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_path, 'wb') as f:
+                        f.write(audio_response.content)
+
+                    print(f"  [{i+1}/{completed_count}] 保存到: {output_path}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"✗ 异步批量请求失败: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                print(f"  错误详情: {error_detail}")
+            except:
+                print(f"  错误详情: {e.response.text}")
+
+
 def test_health(api_url: str):
     """测试健康检查"""
     print("\n" + "=" * 60)
@@ -595,9 +723,9 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["health", "sync", "async", "all", "preset", "batch"],
-        default="batch",
-        help="测试模式（默认: preset）。preset: 测试预设模式, batch: 测试批量生成"
+        choices=["health", "sync", "async", "all", "preset", "batch", "async-batch"],
+        default="async-batch",
+        help="测试模式（默认: preset）。preset: 测试预设模式, batch: 测试批量生成, async-batch: 测试异步批量生成"
     )
     parser.add_argument(
         "--preset-mode",
@@ -615,7 +743,7 @@ def main():
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=10,
+        default=5,
         help="最大并发线程数（默认: 10）"
     )
 
@@ -638,6 +766,10 @@ def main():
     if args.mode == "preset":
         # 测试指定的预设模式
         test_sync_with_mode(args.url, args.preset_mode)
+    
+    if args.mode == "async-batch":
+        # 测试异步批量生成功能
+        test_async_batch_generation(args.url, args.batch_size, args.preset_mode)
 
     if args.mode == "batch":
         # 测试批量生成功能

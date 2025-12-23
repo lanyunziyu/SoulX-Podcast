@@ -10,6 +10,7 @@ from enum import Enum
 class TaskStatus(str, Enum):
     """任务状态枚举"""
     PENDING = "pending"
+    RUNNING = "running"  # 别名，与PROCESSING相同
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"

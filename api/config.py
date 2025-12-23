@@ -47,6 +47,13 @@ class APIConfig:
     # 并发控制
     max_concurrent_tasks: int = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
 
+    # 批处理配置
+    default_batch_size: int = int(os.getenv("DEFAULT_BATCH_SIZE", "4"))
+    batch_timeout: float = float(os.getenv("BATCH_TIMEOUT", "0.5"))
+    max_batch_size: int = int(os.getenv("MAX_BATCH_SIZE", "16"))
+    max_batch_queue_size: int = int(os.getenv("MAX_BATCH_QUEUE_SIZE", "500"))
+    num_batch_workers: int = int(os.getenv("NUM_BATCH_WORKERS", "1"))    
+
     # 默认生成参数
     default_seed: int = 1988
     default_temperature: float = 0.6

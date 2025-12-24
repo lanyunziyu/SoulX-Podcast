@@ -49,6 +49,7 @@ class BatchRequest:
     # 对话元数据
     is_multi_speaker: bool
     total_segments: int
+    speak : int
     segments: List[Dict]
 
     # 生成参数
@@ -91,9 +92,10 @@ class RequestResultStore:
         """存储请求结果"""
         async with self.lock:
             try:
+
                 # 保存音频文件
-                output_path = config.output_dir / f"{request_id}.wav"
-                wavfile.write(str(output_path), sample_rate, audio)
+                # output_path = config.output_dir / f"{request_id}.wav"
+                # wavfile.write(str(output_path), sample_rate, audio)
 
                 # 保留原有的created_at（如果存在）
                 existing_record = self.results.get(request_id, {})
@@ -101,7 +103,7 @@ class RequestResultStore:
 
                 self.results[request_id] = {
                     'status': RequestStatus.COMPLETED,
-                    'output_path': output_path,
+                    # 'output_path': output_path,
                     'sample_rate': sample_rate,
                     'audio_length': len(audio),
                     'created_at': created_at,
@@ -178,13 +180,16 @@ class AsyncBatchManager:
         self.pending_queue: asyncio.Queue[BatchRequest] = asyncio.Queue(
             maxsize=config.max_batch_queue_size
         )
-        self.processing_multi_speaker: Dict[str, BatchRequest] = {}
         self.result_store = RequestResultStore()
 
         # 统计信息
         self.total_requests = 0
         self.completed_requests = 0
         self.failed_requests = 0
+        self.global_start_time: Optional[float] = None
+        self.total_tokens_produced: int = 0
+        self.lock = asyncio.Lock()
+        self.total_audio_duration_produced: float = 0.0
 
         logger.info("AsyncBatchManager initialized")
 
@@ -202,56 +207,39 @@ class AsyncBatchManager:
             logger.error(f"Failed to add request {request.request_id}: {error_msg}")
             raise RuntimeError(error_msg)
 
-    async def get_batch(self, batch_size: int, timeout: float) -> List[BatchRequest]:
-        """
-        收集batch，支持超时机制
 
-        Args:
-            batch_size: 目标batch大小
-            timeout: 超时时间（秒）
-
-        Returns:
-            BatchRequest列表
-        """
-        batch = []
-        deadline = asyncio.get_event_loop().time() + timeout
-
-        # 1. 优先添加多人对话的continuation segments
-        continuation_requests = []
-        for req_id, req in list(self.processing_multi_speaker.items()):
-            if req.current_segment < req.total_segments:
-                continuation_requests.append(req)
-                if len(continuation_requests) >= batch_size:
-                    break
-
-        batch.extend(continuation_requests)
-
-        # 2. 从pending_queue填充新请求
-        while len(batch) < batch_size:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                break  # 超时，立即返回当前batch
-
-            try:
-                request = await asyncio.wait_for(
-                    self.pending_queue.get(),
-                    timeout=min(remaining, 0.1)
-                )
-                batch.append(request)
-            except asyncio.TimeoutError:
-                break
-
-        if batch:
-            logger.info(f"Collected batch: size={len(batch)}, "
-                       f"continuation={len(continuation_requests)}, "
-                       f"new={len(batch)-len(continuation_requests)}")
-
-        return batch
-
-    async def store_result(self, request_id: str, audio: np.ndarray):
+    async def store_result(self, request_id: str, audio: np.ndarray, token_count: int):
         """存储请求结果"""
-        await self.result_store.store_result(request_id, audio)
-        self.completed_requests += 1
+        sample_rate = 24000 
+        current_audio_duration = len(audio) / sample_rate        
+        async with self.lock:
+            # 1. 第一次结果完成时，标记全局开始时间
+            if self.global_start_time is None:
+                self.global_start_time = time.time()
+
+            # 2. 累加数据
+            self.total_tokens_produced += token_count
+            self.total_audio_duration_produced += current_audio_duration
+            self.completed_requests += 1
+
+            # 3. 计算系统级瞬时指标 (System-level metrics)
+            elapsed = time.time() - self.global_start_time
+            system_tps = self.total_tokens_produced / elapsed
+            system_rtf = elapsed / self.total_audio_duration_produced
+            audio_speed = self.total_audio_duration_produced / elapsed
+            # 打印全局看板
+            logger.info(
+                f"\n==== Global Performance Monitor ====\n"
+                f"Completed: {self.completed_requests}/{self.total_requests}\n"
+                f"Elapsed Time: {elapsed:.2f}s\n"
+                f"Total Audio: {self.total_audio_duration_produced:.2f}s\n"
+                f"--------------------------------------\n"
+                f"System TPS: {system_tps:.2f} tokens/s\n"
+                f"System RTF: {system_rtf:.4f} (Speed: {audio_speed:.2f}x)\n"
+                f"========================================"
+            )
+        await self.result_store.store_result(request_id=request_id, audio=audio)
+        # self.completed_requests += 1
 
     async def store_failure(self, request_id: str, error: str):
         """存储失败结果"""
@@ -266,15 +254,7 @@ class AsyncBatchManager:
             """Worker 调用，阻塞直到拿到新任务"""
             return await self.pending_queue.get()    
 
-    def get_statistics(self) -> Dict:
-        """获取统计信息"""
-        return {
-            'total_requests': self.total_requests,
-            'completed_requests': self.completed_requests,
-            'failed_requests': self.failed_requests,
-            'pending_queue_size': self.pending_queue.qsize(),
-            'processing_multi_speaker': len(self.processing_multi_speaker),
-        }
+
 
 
 # 全局单例

@@ -91,33 +91,20 @@ class PodcastDataset(Dataset):
             dialect_prefix_list.append(self.text_tokenizer.encode(f"{TASK_PODCAST}"))
             for spk_idx, (prompt_text, prompt_wav) in enumerate(zip(data["prompt_text"], data["prompt_wav"])):
                 # 1. feature for s3tokenizer
-                start_time = time.time()
                 audio = s3tokenizer.load_audio(prompt_wav, sr=16000)
-                s3tokenizer_load_audio = time.time()
-                logger.info(f"s3tokenizer_load_audio time: {s3tokenizer_load_audio-start_time:.4f}s")
                 audio = audio_volume_normalize(audio)
-                audio_volume_normalize_time = time.time()
-                logger.info(f"audio_volume_normalize_time time: {audio_volume_normalize_time-s3tokenizer_load_audio:.4f}s")
                 # [T]
                 log_mel = s3tokenizer.log_mel_spectrogram(audio)  # [num_mels, T]
-                log_mel_time = time.time()
-                logger.info(f"log_mel_time time: {log_mel_time-audio_volume_normalize_time:.4f}s")
 
                 # 2. feature for speaker embedding
                 spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
-                spk_feat_time = time.time()
-                logger.info(f"log_mel_time time: {spk_feat_time-log_mel_time:.4f}s")
                 spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
                 spk_emb = self.spk_model.run(
                     None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()}
                 )[0].flatten().tolist()
-                speaker_time = time.time()
-                logger.info(f"speaker_time time: {speaker_time-spk_feat_time:.4f}s")
 
                 # 3. feature for flow
                 audio, sample_rate = torchaudio.load(prompt_wav, backend='soundfile')
-                torchaudio_load_time = time.time()
-                logger.info(f"torchaudio_load_time time: {torchaudio_load_time-speaker_time:.4f}s")
                 audio = audio[0]
                 audio = audio_volume_normalize(audio).unsqueeze(0)
                 # audio = audio.mean(dim=0, keepdim=True)  # [1, T]
@@ -127,8 +114,6 @@ class PodcastDataset(Dataset):
                 if mel.shape[0] %2 !=0:
                     mel = mel[:-1]
                 mel_len = mel.shape[0]
-                flow_load_time = time.time()
-                logger.info(f"flow_load_time time: {flow_load_time-torchaudio_load_time:.4f}s")
                 
                 # 4. feature for llm
                 prompt_text = normalize_text(prompt_text) # remove some space and strange character
@@ -149,8 +134,6 @@ class PodcastDataset(Dataset):
                 log_mel_list.append(log_mel)
                 spk_emb_list.append(spk_emb)
                 mel_list.append(mel); mel_len_list.append(mel_len)
-                llm_time = time.time()
-                logger.info(f"llm_time time: {llm_time-flow_load_time:.4f}s")
             item = {
                 "prompt_text_tokens": prompt_text_ids_list,
                 "spk_emb": spk_emb_list, "mel": mel_list, "mel_len": mel_len_list, "log_mel": log_mel_list, "info": data,
@@ -181,8 +164,6 @@ class PodcastDataset(Dataset):
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
             tqdm.write(f"[{timestamp}] - [WARNING] - Error processing data item {data.get('key', idx)}: {e}")
             return None
-        end_time = time.time()
-        logger.info(f"flow_load_time time: {end_time-start_time:.4f}s")
         return item
 
 class PodcastInferHandler(PodcastDataset):

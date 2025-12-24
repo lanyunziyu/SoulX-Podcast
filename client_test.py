@@ -11,6 +11,8 @@ API测试客户端示例
 import requests
 import time
 import json
+import asyncio
+import httpx
 import argparse
 import os
 import concurrent.futures
@@ -70,63 +72,6 @@ def test_sync_single_speaker(api_url: str):
         files['prompt_audio'].close()
 
 
-def test_sync_with_mode(api_url: str, mode: str = "010"):
-    """测试同步生成 - 使用mode参数（预加载数据）"""
-    print("\n" + "=" * 60)
-    print(f"测试: 同步生成 - 使用mode={mode}")
-    print("=" * 60)
-
-    # 模式说明
-    mode_descriptions = {
-        "000": "单人男生普通话",
-        "001": "单人男生英语",
-        "010": "单人女生普通话",
-        "011": "单人女生英语",
-        "120": "双人普通话",
-        "121": "双人英语",
-    }
-
-    print(f"模式: {mode} - {mode_descriptions.get(mode, '未知模式')}")
-
-    # 根据模式准备对话文本
-    if mode[0] == '0':  # 单人
-        dialogue_text = '[S1]大家好，欢迎收听今天的节目。[S1]今天我们要聊一聊[S1]人工智能的最新进展。'
-    else:  # 双人
-        dialogue_text = '[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
-
-    # data 用于发送表单文本字段
-    data = {
-        'mode': mode,
-        'dialogue_text': dialogue_text,
-        'seed': 1988
-    }
-
-    print(f"发送请求到: {api_url}/generate")
-    print(f"对话文本: {dialogue_text[:50]}")
-    start_time = time.time()
-
-    try:
-        # 发送请求（不需要上传文件）
-        response = requests.post(f"{api_url}/generate", data=data)
-        response.raise_for_status()
-
-        # 保存结果
-        output_path = f"api/outputs/test_mode_{mode}.wav"
-        # 确保目录存在
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'wb') as f:
-            f.write(response.content)
-
-        elapsed = time.time() - start_time
-        print(f"✓ 生成成功!")
-        print(f"  耗时: {elapsed:.2f}秒")
-        print(f"  保存到: {output_path}")
-
-    except requests.exceptions.RequestException as e:
-        print(f"✗ 请求失败: {e}")
-        if hasattr(e.response, 'text'):
-            print(f"  错误详情: {e.response.text}")
-
 def test_sync_single_speaker_batch(api_url: str, batch_size: int = 100, max_workers: int = 10):
     """测试同步生成 - 单说话人批量并发请求"""
     print("\n" + "=" * 60)
@@ -157,7 +102,7 @@ def test_sync_single_speaker_batch(api_url: str, batch_size: int = 100, max_work
             ]
 
             try:
-                response = requests.post(f"{api_url}/generate-async", files=files, data=data, timeout=300)
+                response = requests.post(f"{api_url}/generate", files=files, data=data, timeout=300)
                 response.raise_for_status()
                 if response.headers.get('content-type') == 'application/json':
                     response_size = len(response.text.encode('utf-8'))
@@ -319,169 +264,8 @@ def test_sync_multi_speaker(api_url: str):
             file_obj.close()
 
 
-def test_async(api_url: str):
-    """测试异步生成"""
-    print("\n" + "=" * 60)
-    print("测试: 异步生成")
-    print("=" * 60)
-
-    # 准备文件
-    audio_files = [
-        "example/audios/female_mandarin.wav",
-        "example/audios/male_mandarin.wav"
-    ]
-
-    for f in audio_files:
-        if not Path(f).exists():
-            print(f"错误: 找不到音频文件 {f}")
-            print("请确保 'example/audios/female_mandarin.wav' 和 'example/audios/male_mandarin.wav' 存在")
-            return
-
-    files = [
-        ('prompt_audio', open(audio_files[0], 'rb')),
-        ('prompt_audio', open(audio_files[1], 'rb'))
-    ]
-    data = {
-        'prompt_texts': json.dumps([
-            "喜欢攀岩、徒步、滑雪的语言爱好者。",
-            "资深科技播客主持人。"
-        ]),
-        'dialogue_text': '[S1]欢迎收听本期节目。[S2]今天的话题是AI语音合成。[S1]这确实是个很有意思的方向。[S2]没错，让我们深入探讨一下。',
-        'seed': 1988
-    }
-
-    print(f"提交异步任务到: {api_url}/generate-async")
-
-    try:
-        # 提交任务
-        response = requests.post(f"{api_url}/generate-async", files=files, data=data)
-        response.raise_for_status()
-        result = response.json()
-
-        task_id = result['task_id']
-        print(f"✓ 任务已创建: {task_id}")
-
-        # 轮询任务状态
-        print("\n等待任务完成...")
-        max_attempts = 120  
-        attempt = 0
-
-        while attempt < max_attempts:
-            time.sleep(2)
-            attempt += 1
-
-            status_response = requests.get(f"{api_url}/task/{task_id}")
-            status_response.raise_for_status()
-            status = status_response.json()
-
-            print(f"  [{attempt}] 状态: {status['status']}, 进度: {status.get('progress', 0)}%")
-
-            if status['status'] == 'completed':
-                print(f"\n✓ 任务完成!")
-
-                # 下载结果
-                download_url = f"{api_url}{status['result_url']}"
-                print(f"  下载URL: {download_url}")
-
-                audio_response = requests.get(download_url)
-                audio_response.raise_for_status()
-
-                output_path = "api/outputs/test_async.wav"
-                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, 'wb') as f:
-                    f.write(audio_response.content)
-
-                print(f"  保存到: {output_path}")
-                break
-
-            elif status['status'] == 'failed':
-                print(f"\n✗ 任务失败: {status.get('error', '未知错误')}")
-                break
-
-        else:
-            print(f"\n✗ 超时: 任务未在{max_attempts * 2}秒内完成")
-
-    except requests.exceptions.RequestException as e:
-        print(f"✗ 请求失败: {e}")
-    finally:
-        for _, file_obj in files:
-            file_obj.close()
 
 
-def test_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
-    """测试批量生成功能"""
-    print("\n" + "=" * 60)
-    print(f"测试: 批量生成 - {batch_size}个请求，模式: {mode}")
-    print("=" * 60)
-
-    # 模式说明
-    mode_descriptions = {
-        "000": "单人男生普通话",
-        "001": "单人男生英语",
-        "010": "单人女生普通话",
-        "011": "单人女生英语",
-        "120": "双人普通话",
-        "121": "双人英语",
-    }
-
-    print(f"模式: {mode} - {mode_descriptions.get(mode, '未知模式')}")
-
-    # 准备批量请求数据
-    batch_requests = []
-    for i in range(batch_size):
-        # 根据模式生成对话文本
-        if mode[0] == '0':  # 单人模式
-            dialogue_text = f'[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
-        else:  # 双人模式
-            dialogue_text = f'[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。'
-
-        batch_requests.append({
-            "dialogue_text": dialogue_text
-        })
-
-    # 准备请求数据
-    data = {
-        'batch_requests': json.dumps(batch_requests),
-        'mode': mode,
-        'return_format': 'files',  # 返回json格式节省时间
-        'seed': 1988
-    }
-
-    print(f"发送请求到: {api_url}/generate-batch")
-    print(f"批量大小: {batch_size}")
-    print(f"示例文本: {batch_requests[0]['dialogue_text']}")
-    start_time = time.time()
-
-    try:
-        # 发送批量请求
-        response = requests.post(f"{api_url}/generate-batch", data=data)
-        response.raise_for_status()
-
-        elapsed = time.time() - start_time
-        result = response.json()
-
-        print(f"✓ 批量生成成功!")
-        print(f"  耗时: {elapsed:.2f}秒")
-        print(f"  平均每个请求: {elapsed/batch_size:.2f}秒")
-        print(f"  消息: {result.get('message', 'N/A')}")
-        print(f"  批量大小: {result.get('batch_size', 'N/A')}")
-        print(f"  模式: {result.get('mode', 'N/A')}")
-
-        # 显示音频信息
-        audio_lengths = result.get('audio_lengths', [])
-        if audio_lengths:
-            sample_rate = result.get('sample_rate', 24000)
-            avg_length = sum(audio_lengths) / len(audio_lengths)
-            print(f"  平均音频长度: {avg_length/sample_rate:.2f}秒 ({avg_length} samples)")
-
-    except requests.exceptions.RequestException as e:
-        print(f"✗ 批量请求失败: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_detail = e.response.json()
-                print(f"  错误详情: {error_detail}")
-            except:
-                print(f"  错误详情: {e.response.text}")
 
 def get_random_dialogue(request_id: int):
     """
@@ -501,244 +285,108 @@ def get_random_dialogue(request_id: int):
     ]
     return templates[request_id % len(templates)]
 
-def test_batch_generation_total(api_url: str, total_requests: int = 100, batch_size: int = 10, mode: str = "010"):
+
+async def monitor_task_wakeup(client: httpx.AsyncClient, api_url: str, task_id: str, req_idx: int):
     """
-    测试批量生成功能：总计发送 100 个各不相同的请求，按 batch_size 分批发送。
+    【唤醒监听协程】
+    利用后端 /task/{id} 的长轮询机制，实现结果一出来就立刻“唤醒”客户端。
     """
-    print("\n" + "=" * 60)
-    print(f"启动分批差异化测试")
-    print(f"总请求数: {total_requests}, 每批大小: {batch_size}, 模式: {mode}")
-    print("=" * 60)
-
-    num_batches = (total_requests + batch_size - 1) // batch_size
-    all_start_time = time.time()
-    success_count = 0
-
-    for i in range(num_batches):
-        current_batch_count = min(batch_size, total_requests - i * batch_size)
-        print(f"\n正在处理第 {i+1}/{num_batches} 批次...")
-
-        # 1. 动态准备该批次的差异化数据
-        batch_requests = []
-        for j in range(current_batch_count):
-            # 计算全局唯一的请求 ID (1-100)
-            global_id = i * batch_size + j + 1
-            
-            # 生成不同的文本内容
-            diff_text = get_random_dialogue(global_id)
-            
-            batch_requests.append({
-                "dialogue_text": diff_text,
-                "request_id": f"req_{global_id}" # 如果后端支持 id 追踪可以加上
-            })
-
-
-        data = {
-            'batch_requests': json.dumps(batch_requests),
-            'mode': mode,
-            'return_format': 'files', 
-            'seed': 1988 + i # 每批使用不同的随机种子，进一步增加生成差异
-        }
-
-        # 2. 发送请求
-        batch_start = time.time()
-        try:
-            # 增加 timeout，因为 10 条文本的合成可能需要较长时间
-            response = requests.post(f"{api_url}/generate-batch", data=data, timeout=600)
-            response.raise_for_status()
-            
-            batch_elapsed = time.time() - batch_start
-            print(f"   成功 | 耗时: {batch_elapsed:.2f}s | 平均: {batch_elapsed/current_batch_count:.2f}s/条")
-            success_count += current_batch_count
-            
-        except Exception as e:
-            print(f"   失败 | 批次 {i+1}: {str(e)}")
-
-    total_elapsed = time.time() - all_start_time
-    print("\n" + "=" * 60)
-    print(f" 测试总结")
-    print(f"完成/总量: {success_count}/{total_requests}")
-    print(f"总耗时: {total_elapsed:.2f}秒")
-    print(f"系统吞吐率: {success_count/total_elapsed:.2f} 条/秒")
-    print("=" * 60)
-
-
-def test_async_batch_generation(api_url: str, batch_size: int = 5, mode: str = "010"):
-    """测试异步批量生成功能"""
-    print("\n" + "=" * 60)
-    print(f"测试: 异步批量生成 - {batch_size}个请求，模式: {mode}")
-    print("=" * 60)
-
-    # 模式说明
-    mode_descriptions = {
-        "000": "单人男生普通话",
-        "001": "单人男生英语",
-        "010": "单人女生普通话",
-        "011": "单人女生英语",
-        "120": "双人普通话",
-        "121": "双人英语",
-    }
-
-    print(f"模式: {mode} - {mode_descriptions.get(mode, '未知模式')}")
-
-    # 准备批量请求数据（包含多人和单人对话混合）
-    batch_requests = []
-
-    # 添加1个多人对话请求（3段）
-    if mode[0] == '1':  # 双人模式
-        batch_requests.append({
-            "dialogue_text": "[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。"
-        })
-        print(f"请求1: 多人对话 (3段)")
-
-    # 添加单人对话请求
-    for i in range(batch_size - (1 if mode[0] == '1' else 0)):
-        req_num = i + (2 if mode[0] == '1' else 1)
-        batch_requests.append({
-            "dialogue_text": f"[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。"
-        })
-        print(f"请求{req_num}: 单人对话 (1段)")
-
-    # 准备请求数据
-    data = {
-        'batch_requests': json.dumps(batch_requests),
-        'mode': mode,
-        'batch_size': 2,  # 固定batch size为2，测试调度
-    }
-
-    print(f"\n发送异步批量请求到: {api_url}/generate-batch-async")
-    print(f"批量大小: {len(batch_requests)}, 固定batch_size=2")
-    print(f"请求数据: batch_requests数量={len(batch_requests)}, mode={mode}, batch_size=2")
     start_time = time.time()
-
+    # timeout=60 是传递给后端的，告诉后端：没结果请让我的连接挂起 60 秒
+    poll_url = f"{api_url}/task/{task_id}?timeout=60"
+    
     try:
-        # 发送异步批量请求（添加超时）
-        print("正在发送POST请求...")
-        response = requests.post(
-            f"{api_url}/generate-batch-async",
-            data=data,
-            timeout=10  # 10秒超时
-        )
-        print(f"收到响应: status_code={response.status_code}")
+        # httpx 的 timeout 必须大于后端的长轮询 timeout
+        response = await client.get(poll_url, timeout=65)
         response.raise_for_status()
+        status_data = response.json()
 
-        result = response.json()
-        task_ids = [item['task_id'] for item in result]
+        # 如果后端因为超时返回了 processing 状态，我们需要继续发起请求（虽然通常一次长轮询就够了）
+        while status_data['status'] not in ['completed', 'failed']:
+            response = await client.get(poll_url, timeout=65)
+            status_data = response.json()
 
-        print(f"✓ 异步批量请求已提交!")
-        print(f"  收到{len(task_ids)}个任务ID")
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        if status_data['status'] == 'completed':
+            print(f"✨ [唤醒通知] 请求 {req_idx} ({task_id[:8]}) 成功! 耗时: {duration:.2f}s")
+            return {"task_id": task_id, "success": True, "duration": duration}
+        else:
+            print(f"❌ [失败通知] 请求 {req_idx} ({task_id[:8]}) 失败: {status_data.get('error')}")
+            return {"task_id": task_id, "success": False, "duration": duration}
 
-        # 使用长轮询并发等待所有任务完成
-        completed = {}
-        long_poll_timeout = 30  # 每次长轮询30秒
+    except Exception as e:
+        print(f"⚠️ [网络异常] 请求 {req_idx}: {e}")
+        return {"task_id": task_id, "success": False, "duration": 0}
 
-        print("\n等待任务完成（使用长轮询）...")
-
-        # 使用线程池并发轮询
-        import concurrent.futures
-        import threading
-
-        results_lock = threading.Lock()
-
-        def poll_single_task(task_id, req_idx):
-            """长轮询单个任务"""
-            while True:
-                try:
-                    status_response = requests.get(f"{api_url}/task/{task_id}?timeout={long_poll_timeout}")
-                    status_response.raise_for_status()
-                    status = status_response.json()
-
-                    if status['status'] in ['completed', 'failed']:
-                        with results_lock:
-                            completed[task_id] = {
-                                'status': status['status'],
-                                'result_url': status.get('result_url'),
-                                'completed_at': time.time()
-                            }
-                        print(f"  请求{req_idx} ({task_id[:8]}...): {status['status']}")
-                        return
-                    # 如果仍在进行中，继续长轮询
-                except Exception as e:
-                    print(f"  请求{req_idx} ({task_id[:8]}...) 轮询错误: {e}")
-                    with results_lock:
-                        completed[task_id] = {
-                            'status': 'failed',
-                            'result_url': None,
-                            'completed_at': time.time(),
-                            'error': str(e)
-                        }
-                    return
-
-        # 并发轮询所有任务
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(task_ids)) as executor:
-            futures = [
-                executor.submit(poll_single_task, task_id, i+1)
-                for i, task_id in enumerate(task_ids)
-            ]
-            concurrent.futures.wait(futures, timeout=300)  # 最多等待5分钟
-
-        elapsed = time.time() - start_time
-
-        # 统计结果
-        completed_count = len([c for c in completed.values() if c['status'] == 'completed'])
-        failed_count = len([c for c in completed.values() if c['status'] == 'failed'])
-
-        print("\n" + "=" * 60)
-        print("📈 异步批量测试结果统计")
-        print("=" * 60)
-        print(f"总请求数: {len(task_ids)}")
-        print(f"完成请求: {completed_count}")
-        print(f"失败请求: {failed_count}")
-        print(f"未完成请求: {len(task_ids) - len(completed)}")
-        print(f"总耗时: {elapsed:.2f}秒")
-        print(f"平均每个请求: {elapsed/len(task_ids):.2f}秒")
-
-        # 下载完成的音频
-        if completed_count > 0:
-            print(f"\n✓ 开始下载{completed_count}个音频文件...")
-            for i, (task_id, info) in enumerate(completed.items()):
-                if info['status'] == 'completed' and info['result_url']:
-                    download_url = f"{api_url}{info['result_url']}"
-                    audio_response = requests.get(download_url)
-                    audio_response.raise_for_status()
-
-                    output_path = f"api/outputs/async_batch_test_{task_id[:8]}.wav"
-                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-                    with open(output_path, 'wb') as f:
-                        f.write(audio_response.content)
-
-                    print(f"  [{i+1}/{completed_count}] 保存到: {output_path}")
-
-    except requests.exceptions.RequestException as e:
-        print(f"✗ 异步批量请求失败: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_detail = e.response.json()
-                print(f"  错误详情: {error_detail}")
-            except:
-                print(f"  错误详情: {e.response.text}")
-
-
-def test_health(api_url: str):
-    """测试健康检查"""
+async def test_async_batch_generation_wakeup(api_url: str, batch_size: int = 5, mode: str = "120"):
+    """
+    重写后的异步批量测试：
+    1. 批量分发任务
+    2. 并发唤醒监听
+    """
     print("\n" + "=" * 60)
-    print("测试: 健康检查")
+    print(f"🚀 启动测试: 异步批量生成 (唤醒模式) | 规模: {batch_size} | 模式: {mode}")
     print("=" * 60)
 
-    try:
-        response = requests.get(f"{api_url}/health")
-        response.raise_for_status()
-        health = response.json()
+    # 1. 准备批量请求数据
+    batch_requests = []
+    # 模拟混合负载：1个多段对话，其余单段
+    # batch_requests.append({"dialogue_text": "[S1]大家好，欢迎收听今天的节目。[S2]是的，今天我们要聊聊人工智能。[S1]这个话题确实很有趣。"})
+    # batch_requests.append({"dialogue_text": "[S1]哈喽，AI时代的冲浪先锋们！欢迎收听《AI生活进行时》[S2]哎，大家好呀！我是能唠，爱唠，天天都想唠的唠嗑！[S1]最近活得特别赛博朋克哈！以前老是觉得AI是科幻片儿里的"})
+    for i in range(batch_size):
+        batch_requests.append({"dialogue_text": f"[S1]大家好，欢迎收听今天的节目。今天我们要聊一聊人工智能的最新进展。"})
 
-        print(f"✓ API运行正常")
-        print(f"  状态: {health['status']}")
-        print(f"  模型已加载: {health['model_loaded']}")
-        print(f"  GPU可用: {health['gpu_available']}")
-        print(f"  活跃任务: {health['active_tasks']}")
-        print(f"  版本: {health['version']}")
+    async with httpx.AsyncClient() as client:
+        # Step A: 批量提交任务 (Dispatch)
+        print(f"正在分发 {batch_size} 个任务到后端队列...")
+        dispatch_start = time.time()
+        
+        try:
+            submit_resp = await client.post(
+                f"{api_url}/generate-batch-async",
+                data={
+                    'batch_requests': json.dumps(batch_requests),
+                    'mode': mode,
+                    'speak':1,
+                },
+                timeout=15
+            )
+            submit_resp.raise_for_status()
+            tasks_info = submit_resp.json()
+            task_ids = [t['task_id'] for t in tasks_info]
+            print(f"✓ 分发成功! 耗时: {time.time()-dispatch_start:.2f}s, 已获得 {len(task_ids)} 个任务ID")
+        except Exception as e:
+            print(f"✗ 任务提交失败: {e}")
+            return
 
-    except requests.exceptions.RequestException as e:
-        print(f"✗ 健康检查失败: {e}")
+        # Step B: 并发监听唤醒 (Listen)
+        print(f"\n⏳ 正在挂起等待后端唤醒结果 (不占用 CPU)...\n")
+        
+        # 为每个任务 ID 创建一个协程任务
+        monitor_coroutines = [
+            monitor_task_wakeup(client, api_url, tid, i+1) 
+            for i, tid in enumerate(task_ids)
+        ]
+        
+        # 使用 gather 并发执行所有监听
+        all_results = await asyncio.gather(*monitor_coroutines)
+
+        # Step C: 结果统计
+        total_duration = time.time() - dispatch_start
+        success_results = [r for r in all_results if r['success']]
+        
+        print("\n" + "=" * 60)
+        print("📈 异步唤醒模式统计结果")
+        print("=" * 60)
+        print(f"总请求数: {len(all_results)}")
+        print(f"成功完成: {len(success_results)}")
+        print(f"总运行时间: {total_duration:.2f}秒")
+        if success_results:
+            avg_task_time = sum(r['duration'] for r in success_results) / len(success_results)
+            print(f"任务平均周期: {avg_task_time:.2f}秒")
+        print("=" * 60)
 
 
 def main():
@@ -752,7 +400,7 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["health", "sync", "async", "all", "preset", "batch", "async-batch"],
+        choices=["sync", "all", "preset", "async-batch"],
         default="async-batch",
         help="测试模式（默认: preset）。preset: 测试预设模式, batch: 测试批量生成, async-batch: 测试异步批量生成"
     )
@@ -766,7 +414,7 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=3,
+        default=1,
         help="批量测试请求数量（默认: 10）"
     )
     parser.add_argument(
@@ -789,29 +437,11 @@ def main():
         # test_sync_multi_speaker(args.url)
         # test_sync_single_speaker_batch(args.url, args.batch_size, args.max_workers)
 
-    if args.mode == "preset":
-        # 测试指定的预设模式
-        test_sync_with_mode(args.url, args.preset_mode)
     
     if args.mode == "async-batch":
         # 测试异步批量生成功能
-        test_async_batch_generation(args.url, args.batch_size, args.preset_mode)
+        asyncio.run(test_async_batch_generation_wakeup(args.url, args.batch_size, args.preset_mode))
 
-    if args.mode == "batch":
-        # 测试批量生成功能
-        test_batch_generation(args.url, args.batch_size, args.preset_mode)
-        # test_batch_generation_total(args.url, 10 ,args.batch_size, args.preset_mode)
-
-    if args.mode == "all":
-        # 测试所有预设模式
-        print("\n" + "=" * 60)
-        print("测试所有预设模式")
-        print("=" * 60)
-        for preset_mode in ["100", "110", "120"]:
-            test_sync_with_mode(args.url, preset_mode)
-
-    if args.mode in ["async", "all"]:
-        test_async(args.url)
 
     print("\n" + "=" * 60)
     print("测试完成!")
